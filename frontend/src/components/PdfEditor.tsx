@@ -1,6 +1,19 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { PDFDocument, rgb } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
+import {
+    Hand,
+    PenLine,
+    Highlighter,
+    Undo2,
+    Redo2,
+    Trash2,
+    Download,
+    UploadCloud,
+    FileText,
+    ZoomIn,
+    ZoomOut,
+} from "lucide-react";
 
 // Use Vite's native asset URL query to bundle the worker file locally instead of using a CDN
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -21,27 +34,39 @@ interface Point {
     y: number;
 }
 
+type ToolType = "pen" | "highlighter" | null;
+
+type PageSizing = { mode: "fit"; targetWidth: number } | { mode: "scale"; scale: number };
+
 interface PageProps {
     pageNum: number;
     pdfDocument: pdfjsLib.PDFDocumentProxy;
-    mode: "navigate" | "draw";
+    sizing: PageSizing;
+    isDrawMode: boolean;
     annotations: AnnotationPayload[];
     isDrawing: boolean;
     activePage: number | null;
     currentPathD: string;
     currentColor: string;
     currentStrokeWidth: number;
-    currentTool: "pen" | "highlighter";
+    currentTool: ToolType;
     handlePointerDown: (event: React.PointerEvent<SVGSVGElement>, pageNum: number) => void;
     handlePointerMove: (event: React.PointerEvent<SVGSVGElement>, pageNum: number) => void;
     handlePointerUp: (event: React.PointerEvent<SVGSVGElement>, pageNum: number) => void;
-    onDimensionsUpdate: (pageNum: number, width: number, height: number) => void;
+    onDimensionsUpdate: (
+        pageNum: number,
+        width: number,
+        height: number,
+        nativeWidth: number,
+        nativeHeight: number,
+    ) => void;
 }
 
 function PdfPage({
     pageNum,
     pdfDocument,
-    mode,
+    sizing,
+    isDrawMode,
     annotations,
     isDrawing,
     activePage,
@@ -57,18 +82,29 @@ function PdfPage({
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 600, height: 800 });
 
+    const sizingKey = sizing.mode === "fit" ? `fit:${Math.round(sizing.targetWidth)}` : `scale:${sizing.scale}`;
+
     useEffect(() => {
         let isMounted = true;
 
         const renderPage = async () => {
             try {
                 const page = await pdfDocument.getPage(pageNum);
-                const viewport = page.getViewport({ scale: 1.25 });
+                const baseViewport = page.getViewport({ scale: 1 });
+                // "fit" mode sizes the page to the available width (you can scroll vertically as needed).
+                // "scale" mode (zoom) uses an explicit factor, where 1 means the page's true, original size
+                // (1 PDF point per CSS pixel) — applied identically to width and height, so proportions
+                // never change, only overall size.
+                const scale =
+                    sizing.mode === "scale" ?
+                        sizing.scale
+                    :   Math.min(3, Math.max(0.2, sizing.targetWidth / baseViewport.width));
+                const viewport = page.getViewport({ scale });
 
                 if (!isMounted) return;
 
                 setDimensions({ width: viewport.width, height: viewport.height });
-                onDimensionsUpdate(pageNum, viewport.width, viewport.height);
+                onDimensionsUpdate(pageNum, viewport.width, viewport.height, baseViewport.width, baseViewport.height);
 
                 const canvas = canvasRef.current;
                 if (canvas) {
@@ -89,20 +125,21 @@ function PdfPage({
         return () => {
             isMounted = false;
         };
-    }, [pdfDocument, pageNum]);
+    }, [pdfDocument, pageNum, sizingKey]);
 
     return (
         <div
+            className="sheet"
             style={{
-                ...styles.sheetContainer,
                 width: `${dimensions.width}px`,
                 height: `${dimensions.height}px`,
             }}>
-            <div style={styles.labelIndicator}>Sheet {pageNum}</div>
-            <canvas ref={canvasRef} style={styles.nativeDisplayCanvas} />
+            <div className="sheet-label">Page {pageNum}</div>
+            <canvas ref={canvasRef} className="sheet-canvas" />
 
             <svg
-                style={{ ...styles.drawVectorOverlay, pointerEvents: mode === "draw" ? "auto" : "none" }}
+                className="sheet-overlay"
+                style={{ pointerEvents: isDrawMode ? "auto" : "none" }}
                 viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}
                 onPointerDown={(e) => handlePointerDown(e, pageNum)}
                 onPointerMove={(e) => handlePointerMove(e, pageNum)}
@@ -144,20 +181,87 @@ export default function PdfEditor() {
     const [fileName, setFileName] = useState<string>("document.pdf");
     const [documentId, setDocumentId] = useState<string | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
-    const [mode, setMode] = useState<"navigate" | "draw">("navigate");
 
-    // Dynamic configuration studio state parameters
-    const [tool, setTool] = useState<"pen" | "highlighter">("pen");
-    const [color, setColor] = useState<string>("#ff5100");
+    // tool === null means navigate / grab mode. Selecting a tool switches into draw mode.
+    const [tool, setTool] = useState<ToolType>(null);
+    const [color, setColor] = useState<string>("#f4511e");
     const [strokeWidth, setStrokeWidth] = useState<number>(3);
 
-    const [annotations, setAnnotations] = useState<AnnotationPayload[]>([]);
+    // Annotation history, so Undo/Redo can step back and forward through edits.
+    const [history, setHistory] = useState<AnnotationPayload[][]>([[]]);
+    const [historyIndex, setHistoryIndex] = useState<number>(0);
+    const annotations = history[historyIndex];
+
     const [currentPoints, setCurrentPoints] = useState<Point[]>([]);
     const [isDrawing, setIsDrawing] = useState<boolean>(false);
     const [activePage, setActivePage] = useState<number | null>(null);
     const [statusMessage, setStatusMessage] = useState<string>("");
 
-    const pageDimensionsRef = useRef<{ [page: number]: { width: number; height: number } }>({});
+    // Touch devices need an explicit way back to panning; desktop never loses the ability to scroll.
+    const [isTouchDevice, setIsTouchDevice] = useState<boolean>(false);
+
+    // The viewport's real measured width drives "fit" sizing, so pages use all the room they actually have.
+    const viewportRef = useRef<HTMLDivElement>(null);
+    const [containerWidth, setContainerWidth] = useState<number>(
+        typeof window !== "undefined" ? window.innerWidth : 1024,
+    );
+    // null = fit to the viewport width. A number is an explicit zoom factor (1 = the page's true original size).
+    const [manualScale, setManualScale] = useState<number | null>(null);
+
+    const pageDimensionsRef = useRef<{
+        [page: number]: { width: number; height: number; nativeWidth: number; nativeHeight: number };
+    }>({});
+    const isDrawMode = tool !== null;
+    const canUndo = historyIndex > 0;
+    const canRedo = historyIndex < history.length - 1;
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const mq = window.matchMedia("(pointer: coarse)");
+        const update = () => setIsTouchDevice(mq.matches);
+        update();
+        mq.addEventListener("change", update);
+        return () => mq.removeEventListener("change", update);
+    }, []);
+
+    useEffect(() => {
+        const el = viewportRef.current;
+        if (!el || typeof ResizeObserver === "undefined") return;
+        const observer = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+                setContainerWidth(entry.contentRect.width);
+            }
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, []);
+
+    const sizing: PageSizing = useMemo(
+        () =>
+            manualScale === null ?
+                { mode: "fit", targetWidth: Math.max(240, containerWidth) }
+            :   { mode: "scale", scale: manualScale },
+        [manualScale, containerWidth],
+    );
+
+    // Used so Zoom in/out starts from whatever the page is currently showing while in "fit" mode.
+    const getEffectiveScale = useCallback(() => {
+        const first = pageDimensionsRef.current[1];
+        if (!first || !first.nativeWidth) return 1;
+        return first.width / first.nativeWidth;
+    }, []);
+
+    const zoomIn = useCallback(() => {
+        setManualScale((prev) => Math.min(4, Math.round(((prev ?? getEffectiveScale()) + 0.15) * 100) / 100));
+    }, [getEffectiveScale]);
+
+    const zoomOut = useCallback(() => {
+        setManualScale((prev) => Math.max(0.2, Math.round(((prev ?? getEffectiveScale()) - 0.15) * 100) / 100));
+    }, [getEffectiveScale]);
+
+    const toggleActualSize = useCallback(() => {
+        setManualScale((prev) => (prev === null ? 1 : null));
+    }, []);
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -167,7 +271,7 @@ export default function PdfEditor() {
         if (id) setDocumentId(id);
 
         if (pdfUrl) {
-            setStatusMessage("Streaming targeted file contents from remote server...");
+            setStatusMessage("Loading document from server…");
             fetch(pdfUrl)
                 .then((res) => {
                     if (!res.ok) throw new Error("Network file validation error.");
@@ -181,17 +285,26 @@ export default function PdfEditor() {
                     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
                     setPdfDocument(pdf);
                     setNumPages(pdf.numPages);
-                    setStatusMessage("Document binary loaded successfully.");
+                    setHistory([[]]);
+                    setHistoryIndex(0);
+                    setManualScale(null);
+                    setStatusMessage("Document loaded.");
                 })
                 .catch((err) => {
                     console.error(err);
-                    setStatusMessage("Failed to parse external document stream.");
+                    setStatusMessage("Couldn't load that document.");
                 });
         }
     }, []);
 
-    const handleDimensionsUpdate = (pageNum: number, width: number, height: number) => {
-        pageDimensionsRef.current[pageNum] = { width, height };
+    const handleDimensionsUpdate = (
+        pageNum: number,
+        width: number,
+        height: number,
+        nativeWidth: number,
+        nativeHeight: number,
+    ) => {
+        pageDimensionsRef.current[pageNum] = { width, height, nativeWidth, nativeHeight };
     };
 
     const getCoordinates = (event: React.PointerEvent<SVGSVGElement>, pageNum: number): Point => {
@@ -208,7 +321,7 @@ export default function PdfEditor() {
     };
 
     const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>, pageNum: number) => {
-        if (mode !== "draw") return;
+        if (!isDrawMode) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         setIsDrawing(true);
         setActivePage(pageNum);
@@ -218,16 +331,28 @@ export default function PdfEditor() {
     };
 
     const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>, pageNum: number) => {
-        if (!isDrawing || mode !== "draw" || activePage !== pageNum) return;
+        if (!isDrawing || !isDrawMode || activePage !== pageNum) return;
         const pt = getCoordinates(event, pageNum);
         setCurrentPoints((prev) => [...prev, pt]);
     };
+
+    // Pushes a new annotation snapshot onto the history stack, discarding any redo states beyond it.
+    const commitAnnotations = useCallback(
+        (next: AnnotationPayload[]) => {
+            setHistory((prev) => {
+                const trimmed = prev.slice(0, historyIndex + 1);
+                return [...trimmed, next];
+            });
+            setHistoryIndex((idx) => idx + 1);
+        },
+        [historyIndex],
+    );
 
     const handlePointerUp = (_event: React.PointerEvent<SVGSVGElement>, pageNum: number) => {
         if (!isDrawing || activePage !== pageNum) return;
         setIsDrawing(false);
 
-        if (currentPoints.length > 0) {
+        if (currentPoints.length > 1) {
             const dimensions = pageDimensionsRef.current[pageNum] || { width: 600, height: 800 };
 
             const dString = currentPoints.reduce((acc, pt, index) => {
@@ -239,12 +364,12 @@ export default function PdfEditor() {
                 width: dimensions.width,
                 height: dimensions.height,
                 d: dString,
-                color: color,
-                strokeWidth: strokeWidth,
+                color,
+                strokeWidth,
                 opacity: tool === "highlighter" ? 0.4 : 1.0,
             };
 
-            setAnnotations((prev) => [...prev, newAnnotation]);
+            commitAnnotations([...annotations, newAnnotation]);
         }
         setCurrentPoints([]);
         setActivePage(null);
@@ -256,17 +381,46 @@ export default function PdfEditor() {
         }, "");
     }, [currentPoints]);
 
-    // Dynamic layout context tool modification switch
+    const undo = useCallback(() => setHistoryIndex((idx) => Math.max(0, idx - 1)), []);
+    const redo = useCallback(() => setHistoryIndex((idx) => Math.min(history.length - 1, idx + 1)), [history.length]);
+
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (!pdfDocument) return;
+            const mod = e.ctrlKey || e.metaKey;
+            if (!mod) return;
+            const key = e.key.toLowerCase();
+            if (key === "z" && !e.shiftKey) {
+                e.preventDefault();
+                undo();
+            } else if ((key === "z" && e.shiftKey) || key === "y") {
+                e.preventDefault();
+                redo();
+            }
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+    }, [pdfDocument, undo, redo]);
+
+    // Selecting an active tool a second time deselects it and drops back into navigate/grab mode.
     const handleToolSelect = (selectedTool: "pen" | "highlighter") => {
+        if (tool === selectedTool) {
+            setTool(null);
+            return;
+        }
         setTool(selectedTool);
-        setMode("draw");
         if (selectedTool === "highlighter") {
-            setColor("#ffff00");
+            setColor("#ffd60a");
             setStrokeWidth(16);
         } else {
-            setColor("#ff5100");
+            setColor("#f4511e");
             setStrokeWidth(3);
         }
+    };
+
+    const handleClearAll = () => {
+        if (annotations.length === 0) return;
+        commitAnnotations([]);
     };
 
     // Helper utility to safely convert standard hex representations to structural pdf-lib RGB fractions
@@ -280,7 +434,7 @@ export default function PdfEditor() {
 
     const handleSaveAndUpload = async () => {
         if (!pdfBytes) return;
-        setStatusMessage("Baking drawings into PDF binary layer...");
+        setStatusMessage("Applying your markup to the PDF…");
 
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
@@ -337,7 +491,7 @@ export default function PdfEditor() {
             }, 250);
 
             if (documentId) {
-                setStatusMessage("Syncing changes back to the server database...");
+                setStatusMessage("Syncing changes back to the server…");
                 const formData = new FormData();
                 formData.append("file", blob, fileName);
                 formData.append("annotations", JSON.stringify(annotations));
@@ -348,16 +502,16 @@ export default function PdfEditor() {
                 });
 
                 if (response.ok) {
-                    setStatusMessage("Changes successfully recorded to backend pipeline.");
+                    setStatusMessage("Changes saved.");
                 } else {
                     throw new Error("Failed to synchronize file revisions.");
                 }
             } else {
-                setStatusMessage("Document exported locally.");
+                setStatusMessage("Document exported.");
             }
         } catch (err) {
             console.error("Save processing failed details:", err);
-            setStatusMessage("An error occurred while saving the file updates.");
+            setStatusMessage("Something went wrong while saving. Please try again.");
         }
     };
 
@@ -366,7 +520,10 @@ export default function PdfEditor() {
         if (!file) return;
 
         setFileName(file.name);
-        setAnnotations([]);
+        setHistory([[]]);
+        setHistoryIndex(0);
+        setTool(null);
+        setManualScale(null);
         const buffer = await file.arrayBuffer();
         setPdfBytes(buffer);
 
@@ -374,114 +531,199 @@ export default function PdfEditor() {
             const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise;
             setPdfDocument(pdf);
             setNumPages(pdf.numPages);
-            setStatusMessage("Local file loaded successfully.");
+            setStatusMessage("Document loaded.");
         } catch (err) {
             console.error("Error loading PDF binary container layout:", err);
-            setStatusMessage("Failed to initialize local PDF structure.");
+            setStatusMessage("That file couldn't be opened. Please try a different PDF.");
         }
     };
 
+    const hasDocument = Boolean(pdfBytes && pdfDocument);
+
     return (
-        <div style={styles.appContainer}>
-            <div style={styles.topRibbon}>
-                <div style={styles.brandTitle}>Web PDF Studio Editor</div>
+        <div className="app-shell">
+            <style>{STYLES}</style>
 
-                <input
-                    type="file"
-                    accept="application/pdf"
-                    onChange={handleLocalFileLoad}
-                    style={styles.nativeFileInput}
-                />
-
-                {pdfBytes && pdfDocument && (
-                    <div style={styles.actionButtonGroup}>
-                        <button
-                            onClick={() => setMode("navigate")}
-                            style={{
-                                ...styles.controlBtn,
-                                backgroundColor: mode === "navigate" ? "#4a4a4a" : "#e0e0e0",
-                                color: mode === "navigate" ? "#fff" : "#000",
-                            }}>
-                            Hand Navigate
-                        </button>
-
-                        <button
-                            onClick={() => handleToolSelect("pen")}
-                            style={{
-                                ...styles.controlBtn,
-                                backgroundColor: mode === "draw" && tool === "pen" ? "#ff5100" : "#e0e0e0",
-                                color: mode === "draw" && tool === "pen" ? "#fff" : "#000",
-                            }}>
-                            Pen
-                        </button>
-
-                        <button
-                            onClick={() => handleToolSelect("highlighter")}
-                            style={{
-                                ...styles.controlBtn,
-                                backgroundColor: mode === "draw" && tool === "highlighter" ? "#e6b800" : "#e0e0e0",
-                                color: mode === "draw" && tool === "highlighter" ? "#fff" : "#000",
-                            }}>
-                            Highlighter
-                        </button>
-
-                        <button onClick={() => setAnnotations([])} style={styles.controlBtn}>
-                            Clear All
-                        </button>
-
-                        <button
-                            onClick={handleSaveAndUpload}
-                            style={{ ...styles.controlBtn, backgroundColor: "#ff5100", color: "#fff" }}>
-                            Save & Export Workflow
-                        </button>
-                    </div>
-                )}
-            </div>
-
-            {/* Dynamic Interactive Studio Sub-Toolbar Configurator */}
-            {pdfBytes && pdfDocument && mode === "draw" && (
-                <div style={styles.brushConfigToolbar}>
-                    <div style={styles.configItem}>
-                        <label style={styles.configLabel}>Color Picker:</label>
-                        <input
-                            type="color"
-                            value={color}
-                            onChange={(e) => setColor(e.target.value)}
-                            style={styles.colorWidgetInput}
-                        />
+            <header className="toolbar">
+                <div className="toolbar-row">
+                    <div className="brand">
+                        <span className="brand-mark">
+                            <FileText size={18} strokeWidth={2.25} />
+                        </span>
+                        <span className="brand-text">
+                            <span className="brand-title">PDF Studio</span>
+                            {hasDocument && (
+                                <span className="brand-file" title={fileName}>
+                                    {fileName}
+                                </span>
+                            )}
+                        </span>
                     </div>
 
-                    <div style={styles.configItem}>
-                        <label style={styles.configLabel}>Thickness ({strokeWidth}px):</label>
-                        <input
-                            type="range"
-                            min="1"
-                            max="50"
-                            value={strokeWidth}
-                            onChange={(e) => setStrokeWidth(Number(e.target.value))}
-                            style={styles.sliderWidgetInput}
-                        />
-                    </div>
+                    <div className="toolbar-actions">
+                        <label className="btn btn-ghost file-btn">
+                            <UploadCloud size={16} />
+                            <span className="btn-label">Open PDF</span>
+                            <input
+                                type="file"
+                                accept="application/pdf"
+                                onChange={handleLocalFileLoad}
+                                className="file-input"
+                            />
+                        </label>
 
-                    <div style={styles.configItem}>
-                        <span style={styles.badgeLabel}>Active: {tool.toUpperCase()} Mode</span>
+                        {hasDocument && (
+                            <>
+                                <div className="seg-group" role="group" aria-label="Tools">
+                                    {isTouchDevice && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setTool(null)}
+                                            className={`seg-btn ${!isDrawMode ? "seg-btn-active" : ""}`}
+                                            title="Pan and scroll">
+                                            <Hand size={16} />
+                                            <span className="btn-label">Pan</span>
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => handleToolSelect("pen")}
+                                        className={`seg-btn ${tool === "pen" ? "seg-btn-active" : ""}`}
+                                        title="Pen">
+                                        <PenLine size={16} />
+                                        <span className="btn-label">Pen</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleToolSelect("highlighter")}
+                                        className={`seg-btn ${tool === "highlighter" ? "seg-btn-active" : ""}`}
+                                        title="Highlighter">
+                                        <Highlighter size={16} />
+                                        <span className="btn-label">Highlight</span>
+                                    </button>
+                                </div>
+
+                                <div className="icon-cluster">
+                                    <button
+                                        type="button"
+                                        onClick={undo}
+                                        disabled={!canUndo}
+                                        className="icon-btn"
+                                        title="Undo (Ctrl+Z)"
+                                        aria-label="Undo">
+                                        <Undo2 size={17} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={redo}
+                                        disabled={!canRedo}
+                                        className="icon-btn"
+                                        title="Redo (Ctrl+Shift+Z)"
+                                        aria-label="Redo">
+                                        <Redo2 size={17} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleClearAll}
+                                        disabled={annotations.length === 0}
+                                        className="icon-btn icon-btn-danger"
+                                        title="Clear all markup"
+                                        aria-label="Clear all markup">
+                                        <Trash2 size={17} />
+                                    </button>
+                                </div>
+
+                                <div className="icon-cluster">
+                                    <button
+                                        type="button"
+                                        onClick={zoomOut}
+                                        className="icon-btn"
+                                        title="Zoom out"
+                                        aria-label="Zoom out">
+                                        <ZoomOut size={17} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={toggleActualSize}
+                                        className="zoom-label"
+                                        title={
+                                            manualScale === null ?
+                                                "Showing fit width — click for true original size"
+                                            :   "Click to fit the page to your screen"
+                                        }>
+                                        {manualScale === null ? "Fit" : `${Math.round(manualScale * 100)}%`}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={zoomIn}
+                                        className="icon-btn"
+                                        title="Zoom in"
+                                        aria-label="Zoom in">
+                                        <ZoomIn size={17} />
+                                    </button>
+                                </div>
+
+                                <button type="button" onClick={handleSaveAndUpload} className="btn btn-primary">
+                                    <Download size={16} />
+                                    <span className="btn-label">Export PDF</span>
+                                </button>
+                            </>
+                        )}
                     </div>
                 </div>
-            )}
 
-            {statusMessage && <div style={styles.statusBar}>{statusMessage}</div>}
+                {hasDocument && isDrawMode && (
+                    <div className="config-bar">
+                        <div className="config-item">
+                            <span className="config-label">Color</span>
+                            <input
+                                type="color"
+                                value={color}
+                                onChange={(e) => setColor(e.target.value)}
+                                className="swatch-input"
+                                aria-label="Stroke color"
+                            />
+                        </div>
 
-            <div style={styles.viewerViewport}>
-                {!pdfBytes || !pdfDocument ?
-                    <div style={styles.fallbackNotice}>
-                        No target PDF loaded. Stream file using port parameters (?pdfUrl=...) or browse a local file.
+                        <div className="config-item config-item-grow">
+                            <span className="config-label">Thickness</span>
+                            <input
+                                type="range"
+                                min="1"
+                                max="50"
+                                value={strokeWidth}
+                                onChange={(e) => setStrokeWidth(Number(e.target.value))}
+                                className="slider-input"
+                                aria-label="Stroke thickness"
+                            />
+                            <span className="config-value">{strokeWidth}px</span>
+                        </div>
+
+                        <span className="badge">{tool === "pen" ? "Pen" : "Highlighter"} active</span>
+                    </div>
+                )}
+            </header>
+
+            {statusMessage && <div className="status-bar">{statusMessage}</div>}
+
+            <div className="viewport" ref={viewportRef}>
+                {!hasDocument ?
+                    <div className="empty-state">
+                        <div className="empty-icon">
+                            <FileText size={28} strokeWidth={1.5} />
+                        </div>
+                        <p className="empty-title">No PDF open yet</p>
+                        <p className="empty-copy">
+                            Open a local file above, or load one with a <code>?pdfUrl=</code> link parameter.
+                        </p>
                     </div>
                 :   Array.from({ length: numPages }, (_, idx) => idx + 1).map((pageNum) => (
                         <PdfPage
                             key={pageNum}
                             pageNum={pageNum}
-                            pdfDocument={pdfDocument}
-                            mode={mode}
+                            pdfDocument={pdfDocument!}
+                            sizing={sizing}
+                            isDrawMode={isDrawMode}
                             annotations={annotations}
                             isDrawing={isDrawing}
                             activePage={activePage}
@@ -501,129 +743,388 @@ export default function PdfEditor() {
     );
 }
 
-const styles: { [key: string]: React.CSSProperties } = {
-    appContainer: {
-        display: "flex",
-        flexDirection: "column",
-        width: "100vw",
-        height: "100vh",
-        fontFamily: "system-ui, sans-serif",
-        backgroundColor: "#f4f4f6",
-    },
-    topRibbon: {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "14px 28px",
-        backgroundColor: "#ffffff",
-        borderBottom: "1px solid #dcdce0",
-        boxShadow: "0 2px 4px rgba(0,0,0,0.02)",
-        zIndex: 10,
-    },
-    brushConfigToolbar: {
-        display: "flex",
-        alignItems: "center",
-        gap: "24px",
-        padding: "10px 28px",
-        backgroundColor: "#f9f9fb",
-        borderBottom: "1px solid #e5e5ea",
-        zIndex: 9,
-    },
-    configItem: {
-        display: "flex",
-        alignItems: "center",
-        gap: "8px",
-    },
-    configLabel: {
-        fontSize: "13px",
-        fontWeight: 600,
-        color: "#48484a",
-    },
-    colorWidgetInput: {
-        border: "1px solid #d1d1d6",
-        borderRadius: "4px",
-        width: "32px",
-        height: "28px",
-        padding: 0,
-        cursor: "pointer",
-        backgroundColor: "transparent",
-    },
-    sliderWidgetInput: {
-        cursor: "pointer",
-        width: "140px",
-    },
-    badgeLabel: {
-        fontSize: "11px",
-        fontWeight: 700,
-        color: "#555",
-        backgroundColor: "#e5e5ea",
-        padding: "4px 8px",
-        borderRadius: "12px",
-    },
-    brandTitle: { fontWeight: 700, fontSize: "16px", color: "#1c1c1e" },
-    nativeFileInput: { fontSize: "13px" },
-    actionButtonGroup: { display: "flex", gap: "10px" },
-    controlBtn: {
-        padding: "8px 16px",
-        border: "none",
-        borderRadius: "6px",
-        cursor: "pointer",
-        fontWeight: 600,
-        fontSize: "13px",
-        transition: "all 0.15s ease",
-    },
-    statusBar: {
-        padding: "6px 28px",
-        backgroundColor: "#ffefe6",
-        color: "#ff5100",
-        fontSize: "12px",
-        fontWeight: 500,
-        borderBottom: "1px solid #ffe0cc",
-    },
-    viewerViewport: {
-        flex: 1,
-        overflowY: "auto",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        padding: "24px 0",
-        gap: "24px",
-    },
-    fallbackNotice: {
-        marginTop: "120px",
-        color: "#8e8e93",
-        fontSize: "14px",
-        maxWidth: "400px",
-        textAlign: "center",
-        lineHeight: "1.5",
-    },
-    sheetContainer: {
-        position: "relative",
-        boxShadow: "0 10px 30px rgba(0,0,0,0.08)",
-        backgroundColor: "#ffffff",
-        borderRadius: "4px",
-    },
-    labelIndicator: {
-        position: "absolute",
-        top: "12px",
-        left: "12px",
-        backgroundColor: "rgba(28,28,30,0.8)",
-        color: "#ffffff",
-        padding: "4px 8px",
-        borderRadius: "4px",
-        fontSize: "11px",
-        fontWeight: 600,
-        zIndex: 2,
-    },
-    nativeDisplayCanvas: { width: "100%", height: "100%", display: "block" },
-    drawVectorOverlay: {
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: "100%",
-        height: "100%",
-        background: "transparent",
-        touchAction: "none",
-        zIndex: 1,
-    },
-};
+const STYLES = `
+:root {
+    --bg: #f1f2f6;
+    --surface: #ffffff;
+    --border: #e3e4ea;
+    --text: #16171c;
+    --text-soft: #6b6e76;
+    --accent: #f4511e;
+    --accent-soft: #fff1ec;
+    --danger: #d7263d;
+    --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+.app-shell {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.toolbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 1px 0 rgba(16, 17, 22, 0.02);
+    z-index: 10;
+}
+
+.toolbar-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 20px;
+    flex-wrap: wrap;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.brand-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: #fff;
+    flex-shrink: 0;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    min-width: 0;
+}
+
+.brand-title {
+    font-weight: 700;
+    font-size: 14.5px;
+    color: var(--text);
+}
+
+.brand-file {
+    font-size: 12px;
+    color: var(--text-soft);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+    white-space: nowrap;
+}
+
+.btn:active { transform: scale(0.97); }
+
+.btn-ghost {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
+}
+
+.btn-ghost:hover { background: #f7f7f9; }
+
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover { background: #e0440f; }
+
+.file-btn { position: relative; }
+
+.file-input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+}
+
+.seg-group {
+    display: flex;
+    background: #eeeef2;
+    border-radius: 10px;
+    padding: 3px;
+    gap: 2px;
+}
+
+.seg-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-soft);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.seg-btn:hover { color: var(--text); }
+
+.seg-btn-active {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgba(16, 17, 22, 0.12);
+}
+
+.icon-cluster {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: #f7f7f9;
+    border-radius: 10px;
+    padding: 3px;
+}
+
+.icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.icon-btn:hover:not(:disabled) { background: #e9e9ed; }
+
+.icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.icon-btn-danger:hover:not(:disabled) {
+    background: #fdeaec;
+    color: var(--danger);
+}
+
+.zoom-label {
+    min-width: 44px;
+    height: 32px;
+    padding: 0 6px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.zoom-label:hover { background: #e9e9ed; }
+
+.config-bar {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 10px 20px;
+    background: #fafafc;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+
+.config-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.config-item-grow {
+    flex: 1;
+    min-width: 160px;
+}
+
+.config-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-soft);
+    flex-shrink: 0;
+}
+
+.config-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-soft);
+    flex-shrink: 0;
+    min-width: 34px;
+}
+
+.swatch-input {
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    width: 30px;
+    height: 26px;
+    padding: 0;
+    cursor: pointer;
+    background: transparent;
+}
+
+.slider-input {
+    cursor: pointer;
+    flex: 1;
+    accent-color: var(--accent);
+}
+
+.badge {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 5px 10px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.status-bar {
+    padding: 8px 20px;
+    background: #fff8e8;
+    color: #8a6300;
+    font-size: 12.5px;
+    font-weight: 500;
+    border-bottom: 1px solid #f3e7c4;
+}
+
+.viewport {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 28px 12px 60px;
+    gap: 24px;
+}
+
+.empty-state {
+    margin-top: 14vh;
+    max-width: 360px;
+    text-align: center;
+    color: var(--text-soft);
+}
+
+.empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    margin-bottom: 14px;
+}
+
+.empty-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 6px;
+}
+
+.empty-copy {
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.empty-copy code {
+    background: #e9e9ed;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.sheet {
+    position: relative;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    box-shadow: 0 12px 28px rgba(16, 17, 22, 0.08);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.sheet-label {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(22, 23, 28, 0.78);
+    color: #fff;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    z-index: 2;
+    backdrop-filter: blur(2px);
+}
+
+.sheet-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.sheet-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    touch-action: none;
+    z-index: 1;
+}
+
+@media (max-width: 720px) {
+    .toolbar-row { padding: 10px 14px; }
+    .btn-label { display: none; }
+    .btn { padding: 8px 10px; }
+    .brand-file { max-width: 120px; }
+    .config-bar { padding: 10px 14px; gap: 14px; }
+    .viewport { padding: 18px 8px 48px; gap: 16px; }
+}
+`;
