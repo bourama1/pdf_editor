@@ -1,9 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import PdfEditor from "./components/PdfEditor";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-        <App />
+        <div>
+            <PdfEditor />
+        </div>
     </React.StrictMode>,
 );

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>PDF Editor – Test Upload</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+        h1 { font-size: 20px; margin-bottom: 8px; }
+        p { color: #555; font-size: 14px; margin-bottom: 24px; }
+        .card { background: #fff; border-radius: 10px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+        label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 4px; margin-top: 16px; }
+        label:first-child { margin-top: 0; }
+        input, select { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+        button { margin-top: 20px; width: 100%; padding: 10px; background: #f4511e; color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+        button:hover { background: #e0440f; }
+        button:disabled { opacity: .5; cursor: not-allowed; }
+        .error-box { margin-top: 16px; padding: 12px; border-radius: 6px; font-size: 13px; display: none; background: #fbe9e7; color: #c62828; border: 1px solid #ffccbc; white-space: pre-wrap; word-break: break-all; }
+        .error-box.show { display: block; }
+    </style>
+</head>
+<body>
+    <h1>PDF Editor – Test Upload</h1>
+    <p>Upload a PDF and get redirected to the editor.</p>
+
+    <div class="card">
+        <label for="serverUrl">Server URL</label>
+        <input id="serverUrl" value="http://tocz-app4:3000" />
+
+        <label for="returnUrl">Return URL (leave empty to use Origin)</label>
+        <input id="returnUrl" placeholder="http://my-app/callback" />
+
+        <label for="fileInput">PDF file</label>
+        <input type="file" id="fileInput" accept="application/pdf" />
+
+        <button id="sendBtn" disabled>Upload &amp; Open Editor</button>
+        <div class="error-box" id="errorBox"></div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById("fileInput");
+        const sendBtn = document.getElementById("sendBtn");
+        const serverUrl = document.getElementById("serverUrl");
+        const returnUrl = document.getElementById("returnUrl");
+        const errorBox = document.getElementById("errorBox");
+
+        fileInput.addEventListener("change", () => {
+            sendBtn.disabled = !fileInput.files.length;
+            errorBox.classList.remove("show");
+        });
+
+        sendBtn.addEventListener("click", async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            sendBtn.disabled = true;
+            errorBox.classList.remove("show");
+
+            const fd = new FormData();
+            fd.append("file", file);
+            if (returnUrl.value.trim()) {
+                fd.append("returnUrl", returnUrl.value.trim());
+            }
+
+            try {
+                const res = await fetch(serverUrl.value.trim() + "/upload", { method: "POST", body: fd });
+                const data = await res.json();
+
+                if (res.ok) {
+                    // Redirect straight to the editor
+                    window.location.href = data.editUrl;
+                } else {
+                    errorBox.textContent = `Error ${res.status}: ${data.error || "Unknown"}`;
+                    errorBox.classList.add("show");
+                    sendBtn.disabled = false;
+                }
+            } catch (err) {
+                errorBox.textContent = `Network error: ${err.message}`;
+                errorBox.classList.add("show");
+                sendBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

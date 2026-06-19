@@ -1,0 +1,84 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build: frontend",
+            "type": "shell",
+            "command": "npx vite build",
+            "options": {
+                "cwd": "${workspaceFolder}/frontend"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "build: backend (tsc)",
+            "type": "shell",
+            "command": "npx tsc",
+            "options": {
+                "cwd": "${workspaceFolder}/backend"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "package: exe",
+            "type": "process",
+            "command": "node",
+            "args": [
+                "node_modules/@yao-pkg/pkg/lib-es5/bin.js",
+                "dist/server.js",
+                "--output",
+                "pdf-editor.exe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/backend"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "full build (frontend + tsc + exe)",
+            "dependsOn": [
+                "build: frontend",
+                "build: backend (tsc)",
+                "package: exe"
+            ],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "dev: backend",
+            "type": "shell",
+            "command": "npx ts-node-dev --respawn --transpile-only server.ts",
+            "options": {
+                "cwd": "${workspaceFolder}/backend"
+            },
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "dev: frontend",
+            "type": "shell",
+            "command": "npx vite",
+            "options": {
+                "cwd": "${workspaceFolder}/frontend"
+            },
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "clean: build artifacts",
+            "type": "shell",
+            "command": "if exist public rmdir /s /q public & if exist dist rmdir /s /q dist & if exist pdf-editor.exe del /q pdf-editor.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/backend"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
