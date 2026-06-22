@@ -935,12 +935,13 @@ export default function PdfEditor() {
             }
             if (window.ReactNativeWebView?.postMessage) {
                 window.ReactNativeWebView.postMessage(JSON.stringify({ type: "SAVED" }));
-            } else if (returnUrl) {
-                setStatusMessage("Saved! Redirecting…");
-                setTimeout(() => {
-                    window.location.href = returnUrl;
-                }, 1000);
             }
+
+            // Close the tab after a short delay (works for both window.open and
+            // standalone .exe).  If we're inside a React Native WebView it's a no-op.
+            setTimeout(() => {
+                window.close();
+            }, 1500);
         } catch (err) {
             console.error(err);
             setStatusMessage("Save failed. Please try again.");

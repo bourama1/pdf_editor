@@ -60,6 +60,7 @@ interface Session {
     originalPath: string;
     returnUrl: string;
     createdAt: Date;
+    savePath?: string; // network share path to write edited PDF
 }
 
 const sessions = new Map<string, Session>();
@@ -124,6 +125,59 @@ app.post("/upload", upload.single("file"), (req, res) => {
     res.json({ id, editUrl });
 });
 
+// POST /edit-from-docmgr – accept a doc_manager URL, download PDF, create session,
+// save edited PDF to network share path, return edit URL
+app.post("/edit-from-docmgr", async (req, res) => {
+    const { docmgrUrl, filename, saveDir, saveFilename } = req.body;
+
+    if (!docmgrUrl || !filename) {
+        return res.status(400).json({ error: "docmgrUrl and filename are required" });
+    }
+
+    try {
+        console.log(`[edit-from-docmgr] Downloading ${docmgrUrl}`);
+        const pdfResponse = await fetch(docmgrUrl, { timeout: 30000 });
+        if (!pdfResponse.ok) {
+            return res.status(502).json({ error: `doc_manager returned ${pdfResponse.status}` });
+        }
+
+        const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
+        const id = crypto.randomUUID();
+
+        const uploadDir = path.join(DATA_DIR, "uploads");
+        ensureDir(uploadDir);
+        const filePath = path.join(uploadDir, `${id}_${filename}`);
+        fs.writeFileSync(filePath, pdfBuffer);
+
+        const savePath = saveDir && saveFilename
+            ? path.join(saveDir, saveFilename)
+            : undefined;
+
+        sessions.set(id, {
+            id,
+            fileName: filename,
+            originalPath: filePath,
+            returnUrl: "",
+            createdAt: new Date(),
+            savePath,
+        });
+
+        // If savePath was provided, ensure the directory exists
+        if (savePath) {
+            try { fs.mkdirSync(path.dirname(savePath), { recursive: true }); } catch { /* ignore */ }
+        }
+
+        const editUrl = process.env.FRONTEND_URL
+            ? `${process.env.FRONTEND_URL.replace(/\/+$/, "")}/?session=${id}`
+            : `${req.protocol}://${req.get("host")}/?session=${id}`;
+
+        res.json({ id, editUrl });
+    } catch (err: any) {
+        console.error(`[edit-from-docmgr] Error: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // GET /sessions/:id/info – get session metadata (fileName, returnUrl)
 app.get("/sessions/:id/info", (req, res) => {
     const session = sessions.get(req.params.id);
@@ -154,6 +208,18 @@ app.post("/sessions/:id/save", upload.single("file"), async (req, res) => {
         fs.unlinkSync(oldPath);
     } catch {
         /* file may be gone */
+    }
+
+    // Write to network share savePath if configured
+    if (session.savePath) {
+        try {
+            const dir = path.dirname(session.savePath);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            fs.copyFileSync(req.file.path, session.savePath);
+            console.log(`[save] Copied edited PDF to ${session.savePath}`);
+        } catch (err: any) {
+            console.error(`[save] Failed to write to savePath: ${err.message}`);
+        }
     }
 
     // Try to forward to returnUrl if one exists
