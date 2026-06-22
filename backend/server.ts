@@ -64,6 +64,25 @@ interface Session {
 
 const sessions = new Map<string, Session>();
 
+const SESSION_TTL = 60 * 60 * 1000; // 1 hour
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // every 5 minutes
+
+function cleanExpiredSessions() {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+        if (now - session.createdAt.getTime() > SESSION_TTL) {
+            console.log(`[cleanup] Removing expired session ${id} (${session.fileName})`);
+            try {
+                fs.unlinkSync(session.originalPath);
+            } catch {
+                /* file may be gone */
+            }
+            sessions.delete(id);
+        }
+    }
+}
+setInterval(cleanExpiredSessions, CLEANUP_INTERVAL);
+
 // Multer storage – write uploads to the real filesystem (works with both dev and pkg)
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -126,6 +145,15 @@ app.post("/sessions/:id/save", upload.single("file"), async (req, res) => {
 
     if (!req.file) {
         return res.status(400).json({ error: "No PDF file provided" });
+    }
+
+    // Point session to the edited PDF so subsequent /sessions/:id/pdf returns it
+    const oldPath = session.originalPath;
+    session.originalPath = req.file.path;
+    try {
+        fs.unlinkSync(oldPath);
+    } catch {
+        /* file may be gone */
     }
 
     // Try to forward to returnUrl if one exists

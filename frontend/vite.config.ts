@@ -15,5 +15,14 @@ export default defineConfig({
     build: {
         outDir: "../backend/public",
         emptyOutDir: true,
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    vendor: ["react", "react-dom"],
+                    "pdf-lib": ["pdf-lib"],
+                    "pdfjs-dist": ["pdfjs-dist"],
+                },
+            },
+        },
     },
 });

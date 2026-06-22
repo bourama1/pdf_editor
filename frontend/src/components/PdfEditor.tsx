@@ -19,6 +19,21 @@ import {
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
+const COLOR_PRESETS = [
+    "#e03131",
+    "#e8590c",
+    "#f08c00",
+    "#2f9e44",
+    "#099268",
+    "#0c8599",
+    "#1971c2",
+    "#6741d9",
+    "#9c36b5",
+    "#c2255c",
+    "#f4511e",
+    "#ffd60a",
+];
+
 // ─── types ────────────────────────────────────────────────────────────────────
 
 interface AnnotationPayload {
@@ -152,6 +167,8 @@ function PdfPage({
         (async () => {
             try {
                 const page = await pdfDocument.getPage(pageNum);
+                // Access page.rotate to ensure lazy properties are loaded
+                void page.rotate;
                 const base = page.getViewport({ scale: 1 });
                 const scale =
                     sizing.mode === "scale" ?
@@ -198,18 +215,23 @@ function PdfPage({
                 onPointerUp={(e) => onSvgPointerUp(e, pageNum)}>
                 {annotations
                     .filter((a) => a.page === pageNum)
-                    .map((a, i) => (
-                        <path
-                            key={i}
-                            d={a.d}
-                            stroke={a.color}
-                            strokeWidth={a.strokeWidth}
-                            strokeOpacity={a.opacity}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            fill="none"
-                        />
-                    ))}
+                    .map((a, i) => {
+                        const sx = dim.width / a.width;
+                        const sy = dim.height / a.height;
+                        return (
+                            <g key={i} transform={`scale(${sx}, ${sy})`}>
+                                <path
+                                    d={a.d}
+                                    stroke={a.color}
+                                    strokeWidth={a.strokeWidth}
+                                    strokeOpacity={a.opacity}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    fill="none"
+                                />
+                            </g>
+                        );
+                    })}
                 {isDrawing && activePage === pageNum && currentPathD && (
                     <path
                         d={currentPathD}
@@ -227,17 +249,19 @@ function PdfPage({
             {pageTBs.map((tb) => {
                 const isSel = selectedId === tb.id;
                 const isEd = editingId === tb.id;
+                const sx = dim.width / tb.pageWidth;
+                const sy = dim.height / tb.pageHeight;
 
                 return (
                     <div
                         key={tb.id}
                         className={`tb${isSel ? " tb-selected" : ""}`}
                         style={{
-                            left: tb.x,
-                            top: tb.y,
-                            width: tb.w,
-                            height: tb.h,
-                            fontSize: tb.fontSize,
+                            left: tb.x * sx,
+                            top: tb.y * sy,
+                            width: tb.w * sx,
+                            height: tb.h * sy,
+                            fontSize: tb.fontSize * Math.min(sx, sy),
                             color: tb.color,
                             cursor:
                                 isEd ? "text"
@@ -265,8 +289,8 @@ function PdfPage({
                                     key={pos}
                                     className="tb-handle"
                                     style={{
-                                        left: tb.w * xRatio - HS / 2,
-                                        top: tb.h * yRatio - HS / 2,
+                                        left: tb.w * sx * xRatio - HS / 2,
+                                        top: tb.h * sy * yRatio - HS / 2,
                                         width: HS,
                                         height: HS,
                                         cursor,
@@ -284,7 +308,7 @@ function PdfPage({
                                 className="tb-textarea"
                                 autoFocus
                                 value={tb.text}
-                                style={{ fontSize: tb.fontSize, color: tb.color }}
+                                style={{ fontSize: tb.fontSize * Math.min(sx, sy), color: tb.color }}
                                 onChange={(e) => onTextChange(tb.id, e.target.value)}
                                 onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => e.stopPropagation()}
@@ -357,7 +381,7 @@ export default function PdfEditor() {
 
     const [isTouchDevice, setIsTouchDevice] = useState(false);
     const viewportRef = useRef<HTMLDivElement>(null);
-    const [containerWidth, setContainerWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 1024);
+    const [containerWidth, setContainerWidth] = useState(0);
     const [manualScale, setManualScale] = useState<number | null>(null);
     const pageDimRef = useRef<
         Record<number, { width: number; height: number; nativeWidth: number; nativeHeight: number }>
@@ -505,11 +529,30 @@ export default function PdfEditor() {
     }, []);
 
     const commitTextBoxes = useCallback((next: TextBox[]) => {
+        // Normalize all text boxes to current viewBox dimensions so they
+        // survive zoom changes without drifting.
+        const norm = next.map((tb) => {
+            const d = pageDimRef.current[tb.page];
+            if (d && (d.width !== tb.pageWidth || d.height !== tb.pageHeight)) {
+                const sx = d.width / tb.pageWidth;
+                const sy = d.height / tb.pageHeight;
+                return {
+                    ...tb,
+                    x: tb.x * sx,
+                    y: tb.y * sy,
+                    w: tb.w * sx,
+                    h: tb.h * sy,
+                    pageWidth: d.width,
+                    pageHeight: d.height,
+                };
+            }
+            return tb;
+        });
         const idx = tbIdxRef.current;
-        setTbHistory((prev) => [...prev.slice(0, idx + 1), next]);
+        setTbHistory((prev) => [...prev.slice(0, idx + 1), norm]);
         tbIdxRef.current = idx + 1;
         setTbIdx(idx + 1);
-        liveTbRef.current = next;
+        liveTbRef.current = norm;
     }, []);
 
     // ── undo / redo ───────────────────────────────────────────────────
@@ -607,19 +650,17 @@ export default function PdfEditor() {
         };
     };
 
-    // For click-catcher divs (text mode), compute coords from a div pointer event
-    const getDivCoords = (e: React.PointerEvent<HTMLDivElement>, page: number): Point => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const dim = pageDimRef.current[page] || { width: rect.width, height: rect.height };
-        return {
-            x: (e.clientX - rect.left) * (dim.width / rect.width),
-            y: (e.clientY - rect.top) * (dim.height / rect.height),
-        };
-    };
-
     // ── SVG pointer handlers (draw mode) ─────────────────────────────
     const handleSvgPointerDown = (e: React.PointerEvent<SVGSVGElement>, page: number) => {
         if (isTextMode) {
+            // If currently editing a text box, clicking outside exits edit mode
+            // without creating a new box.
+            if (editingId) {
+                commitTextBoxes([...liveTbRef.current]);
+                setSelectedId(null);
+                setEditingId(null);
+                return;
+            }
             // Create new text box
             const pt = getSvgCoords(e, page);
             const dim = pageDimRef.current[page] || { width: 600, height: 800 };
@@ -663,7 +704,7 @@ export default function PdfEditor() {
         setCurrentPoints(next);
     };
 
-    const handleSvgPointerUp = (e: React.PointerEvent<SVGSVGElement>, page: number) => {
+    const handleSvgPointerUp = (_e: React.PointerEvent<SVGSVGElement>, page: number) => {
         // Use refs instead of state so this guard works even when pointerDown and
         // pointerUp fire in the same React batch (stale-closure would make the
         // state values appear unchanged).
@@ -699,46 +740,39 @@ export default function PdfEditor() {
         }
     };
 
-    // ── text-tool click catcher (blank page area) ─────────────────────
-    // We reuse handleSvgPointerDown by casting — the coords logic works the same
-    const handleCatcherPointerDown = (e: React.PointerEvent<HTMLDivElement>, page: number) => {
-        if (!isTextMode) return;
-        const pt = getDivCoords(e, page);
-        const dim = pageDimRef.current[page] || { width: 600, height: 800 };
-        const nb: TextBox = {
-            id: uid(),
-            page,
-            x: pt.x,
-            y: pt.y,
-            w: 220,
-            h: 80,
-            text: "",
-            fontSize: textFontSize,
-            color: textColor,
-            pageWidth: dim.width,
-            pageHeight: dim.height,
-        };
-        const next = [...liveTbRef.current, nb];
-        commitTextBoxes(next);
-        setSelectedId(nb.id);
-        setEditingId(nb.id);
-    };
-
     // ── text box interaction ──────────────────────────────────────────
     const handleBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>, id: string) => {
         if (editingId === id) return;
         e.currentTarget.setPointerCapture(e.pointerId);
         const tb = liveTbRef.current.find((t) => t.id === id);
         if (!tb) return;
+        // Normalize coordinates to current viewBox so drag delta stays correct
+        // after a zoom change.
+        const d = pageDimRef.current[tb.page];
+        const nx = d ? tb.x * (d.width / tb.pageWidth) : tb.x;
+        const ny = d ? tb.y * (d.height / tb.pageHeight) : tb.y;
+        const nw = d ? tb.w * (d.width / tb.pageWidth) : tb.w;
+        const nh = d ? tb.h * (d.height / tb.pageHeight) : tb.h;
+        // Update liveTbRef so rendering during drag uses normalized values
+        const updated = {
+            ...tb,
+            x: nx,
+            y: ny,
+            w: nw,
+            h: nh,
+            pageWidth: d?.width ?? tb.pageWidth,
+            pageHeight: d?.height ?? tb.pageHeight,
+        };
+        liveTbRef.current = liveTbRef.current.map((t) => (t.id === id ? updated : t));
         dragRef.current = {
             kind: "move",
             id,
             startMouseX: e.clientX,
             startMouseY: e.clientY,
-            origX: tb.x,
-            origY: tb.y,
-            origW: tb.w,
-            origH: tb.h,
+            origX: nx,
+            origY: ny,
+            origW: nw,
+            origH: nh,
         };
     };
 
@@ -747,16 +781,31 @@ export default function PdfEditor() {
         e.currentTarget.setPointerCapture(e.pointerId);
         const tb = liveTbRef.current.find((t) => t.id === id);
         if (!tb) return;
+        const d = pageDimRef.current[tb.page];
+        const nx = d ? tb.x * (d.width / tb.pageWidth) : tb.x;
+        const ny = d ? tb.y * (d.height / tb.pageHeight) : tb.y;
+        const nw = d ? tb.w * (d.width / tb.pageWidth) : tb.w;
+        const nh = d ? tb.h * (d.height / tb.pageHeight) : tb.h;
+        const updated = {
+            ...tb,
+            x: nx,
+            y: ny,
+            w: nw,
+            h: nh,
+            pageWidth: d?.width ?? tb.pageWidth,
+            pageHeight: d?.height ?? tb.pageHeight,
+        };
+        liveTbRef.current = liveTbRef.current.map((t) => (t.id === id ? updated : t));
         dragRef.current = {
             kind: "resize",
             id,
             handle,
             startMouseX: e.clientX,
             startMouseY: e.clientY,
-            origX: tb.x,
-            origY: tb.y,
-            origW: tb.w,
-            origH: tb.h,
+            origX: nx,
+            origY: ny,
+            origW: nw,
+            origH: nh,
         };
     };
 
@@ -822,24 +871,25 @@ export default function PdfEditor() {
                 const pg = pages[ann.page - 1];
                 if (!pg) return;
                 const { width: pw, height: ph } = pg.getSize();
-                let cur: Point | null = null;
-                ann.d.split(/(?=[ML])/).forEach((cmd) => {
-                    const t = cmd[0];
-                    const ns = cmd.slice(1).split(",").map(Number);
-                    if (ns.length < 2 || isNaN(ns[0])) return;
-                    const pt = { x: (ns[0] / ann.width) * pw, y: (1 - ns[1] / ann.height) * ph };
-                    if (t === "M") {
-                        cur = pt;
-                    } else if (t === "L" && cur) {
-                        pg.drawLine({
-                            start: cur,
-                            end: pt,
-                            thickness: ann.strokeWidth,
-                            color: hexToRgb(ann.color),
-                            opacity: ann.opacity,
-                        });
-                        cur = pt;
-                    }
+                const scaleX = pw / ann.width;
+                const scaleY = ph / ann.height;
+                const transformedD = ann.d
+                    .split(/(?=[ML])/)
+                    .map((cmd) => {
+                        const t = cmd[0];
+                        const ns = cmd.slice(1).split(",").map(Number);
+                        if (ns.length < 2 || isNaN(ns[0])) return "";
+                        return `${t}${ns[0] * scaleX},${ns[1] * scaleY}`;
+                    })
+                    .filter(Boolean)
+                    .join(" ");
+                pg.drawSvgPath(transformedD, {
+                    x: 0,
+                    y: ph,
+                    borderColor: hexToRgb(ann.color),
+                    borderWidth: ann.strokeWidth * scaleX,
+                    opacity: ann.opacity,
+                    borderOpacity: ann.opacity,
                 });
             });
 
@@ -876,22 +926,16 @@ export default function PdfEditor() {
                 return;
             }
 
-            const ct = res.headers.get("Content-Type") || "";
-            if (ct.includes("application/pdf")) {
-                // PDF returned – download it
-                const pdfBlob = await res.blob();
-                const url = URL.createObjectURL(pdfBlob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `edited_${fileName}`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(() => URL.revokeObjectURL(url), 250);
-                setStatusMessage("PDF saved.");
-            }
+            setStatusMessage("Saved.");
 
-            if (returnUrl) {
+            // Notify the opener window (opened via window.open from the app) so
+            // it can refresh the PDF, then close this tab.
+            if (window.opener && window.opener !== window) {
+                window.opener.postMessage({ type: "SAVED" }, "*");
+            }
+            if (window.ReactNativeWebView?.postMessage) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({ type: "SAVED" }));
+            } else if (returnUrl) {
                 setStatusMessage("Saved! Redirecting…");
                 setTimeout(() => {
                     window.location.href = returnUrl;
@@ -932,24 +976,25 @@ export default function PdfEditor() {
                 const pg = pages[ann.page - 1];
                 if (!pg) return;
                 const { width: pw, height: ph } = pg.getSize();
-                let cur: Point | null = null;
-                ann.d.split(/(?=[ML])/).forEach((cmd) => {
-                    const t = cmd[0];
-                    const ns = cmd.slice(1).split(",").map(Number);
-                    if (ns.length < 2 || isNaN(ns[0])) return;
-                    const pt = { x: (ns[0] / ann.width) * pw, y: (1 - ns[1] / ann.height) * ph };
-                    if (t === "M") {
-                        cur = pt;
-                    } else if (t === "L" && cur) {
-                        pg.drawLine({
-                            start: cur,
-                            end: pt,
-                            thickness: ann.strokeWidth,
-                            color: hexToRgb(ann.color),
-                            opacity: ann.opacity,
-                        });
-                        cur = pt;
-                    }
+                const scaleX = pw / ann.width;
+                const scaleY = ph / ann.height;
+                const transformedD = ann.d
+                    .split(/(?=[ML])/)
+                    .map((cmd) => {
+                        const t = cmd[0];
+                        const ns = cmd.slice(1).split(",").map(Number);
+                        if (ns.length < 2 || isNaN(ns[0])) return "";
+                        return `${t}${ns[0] * scaleX},${ns[1] * scaleY}`;
+                    })
+                    .filter(Boolean)
+                    .join(" ");
+                pg.drawSvgPath(transformedD, {
+                    x: 0,
+                    y: ph,
+                    borderColor: hexToRgb(ann.color),
+                    borderWidth: ann.strokeWidth * scaleX,
+                    opacity: ann.opacity,
+                    borderOpacity: ann.opacity,
                 });
             });
 
@@ -991,6 +1036,9 @@ export default function PdfEditor() {
                     body: fd,
                 });
                 setStatusMessage(res.ok ? "Changes saved." : "Save failed.");
+                if (res.ok && window.ReactNativeWebView?.postMessage) {
+                    window.ReactNativeWebView.postMessage(JSON.stringify({ type: "SAVED" }));
+                }
             } else {
                 setStatusMessage("Document exported.");
             }
@@ -1158,12 +1206,22 @@ export default function PdfEditor() {
                     <div className="config-bar">
                         <div className="config-item">
                             <span className="config-label">Color</span>
-                            <input
-                                type="color"
-                                value={color}
-                                onChange={(e) => setColor(e.target.value)}
-                                className="swatch-input"
-                            />
+                            <div className="swatches">
+                                {COLOR_PRESETS.map((c) => (
+                                    <button
+                                        key={c}
+                                        className={"swatch" + (c === color ? " swatch-active" : "")}
+                                        style={{ background: c }}
+                                        onClick={() => setColor(c)}
+                                    />
+                                ))}
+                                <input
+                                    type="color"
+                                    value={color}
+                                    onChange={(e) => setColor(e.target.value)}
+                                    className="swatch-input"
+                                />
+                            </div>
                         </div>
                         <div className="config-item config-item-grow">
                             <span className="config-label">Thickness</span>
@@ -1185,12 +1243,22 @@ export default function PdfEditor() {
                     <div className="config-bar">
                         <div className="config-item">
                             <span className="config-label">Color</span>
-                            <input
-                                type="color"
-                                value={textColor}
-                                onChange={(e) => setTextColor(e.target.value)}
-                                className="swatch-input"
-                            />
+                            <div className="swatches">
+                                {COLOR_PRESETS.map((c) => (
+                                    <button
+                                        key={c}
+                                        className={"swatch" + (c === textColor ? " swatch-active" : "")}
+                                        style={{ background: c }}
+                                        onClick={() => setTextColor(c)}
+                                    />
+                                ))}
+                                <input
+                                    type="color"
+                                    value={textColor}
+                                    onChange={(e) => setTextColor(e.target.value)}
+                                    className="swatch-input"
+                                />
+                            </div>
                         </div>
                         <div className="config-item config-item-grow">
                             <span className="config-label">Font size</span>
@@ -1228,9 +1296,11 @@ export default function PdfEditor() {
                             Open a local file above, or load one with a <code>?pdfUrl=</code> link parameter.
                         </p>
                     </div>
+                : containerWidth === 0 ?
+                    null
                 :   Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
                         <PdfPage
-                            key={pageNum}
+                            key={`${pageNum}-${sizing.mode}-${Math.round(sizing.mode === "fit" ? sizing.targetWidth : sizing.scale * 100)}`}
                             pageNum={pageNum}
                             pdfDocument={pdfDocument!}
                             sizing={sizing}
@@ -1331,6 +1401,11 @@ const STYLES = `
 .config-value { font-size:12px; font-weight:600; color:var(--text-soft); flex-shrink:0; min-width:34px; }
 .swatch-input { border:1px solid var(--border); border-radius:7px;
     width:30px; height:26px; padding:0; cursor:pointer; background:transparent; }
+.swatches { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+.swatch { width:18px; height:18px; border-radius:4px; border:2px solid transparent;
+    cursor:pointer; padding:0; flex-shrink:0; }
+.swatch:hover { border-color:var(--text-soft); }
+.swatch-active { border-color:var(--text); }
 .slider-input { cursor:pointer; flex:1; accent-color:var(--accent); }
 .badge { font-size:11px; font-weight:700; color:var(--accent); background:var(--accent-soft);
     padding:5px 10px; border-radius:999px; text-transform:uppercase; letter-spacing:.02em; }
