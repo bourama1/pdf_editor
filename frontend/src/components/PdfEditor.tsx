@@ -439,8 +439,54 @@ export default function PdfEditor() {
     );
     const toggleFit = useCallback(() => setManualScale((p) => (p === null ? 1 : null)), []);
 
-    // ── initial URL load ──────────────────────────────────────────────
+    // ── initial load ──────────────────────────────────────────────────
     useEffect(() => {
+        const win = window as any;
+        const tryInline = () => {
+            const inlineData = win.__INLINE_PDF_DATA__ as string | undefined;
+            if (!inlineData) return false;
+            setFileName(win.__INLINE_FILE_NAME__ || "document.pdf");
+            setReturnUrl("app");
+            setStatusMessage("Loading document…");
+            try {
+                const binaryStr = atob(inlineData);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) {
+                    bytes[i] = binaryStr.charCodeAt(i);
+                }
+                setPdfBytes(bytes.buffer);
+                pdfjsLib
+                    .getDocument({ data: bytes.slice(0) })
+                    .promise.then((pdf) => {
+                        setPdfDocument(pdf);
+                        setNumPages(pdf.numPages);
+                        setHistory([[]]);
+                        setHIdx(0);
+                        setTbHistory([[]]);
+                        setTbIdx(0);
+                        setManualScale(null);
+                        setStatusMessage("Document loaded.");
+                    })
+                    .catch(() => setStatusMessage("Couldn't load that document."));
+            } catch {
+                setStatusMessage("Couldn't load PDF data.");
+            }
+            return true;
+        };
+
+        if (tryInline()) return;
+
+        // Watch for inline data injected later (mobile app injects after onLoad)
+        let _data: string | undefined;
+        Object.defineProperty(win, "__INLINE_PDF_DATA__", {
+            get: () => _data,
+            set: (val) => {
+                _data = val;
+                if (val) tryInline();
+            },
+            configurable: true,
+        });
+
         const params = new URLSearchParams(window.location.search);
         const pdfUrl = params.get("pdfUrl");
         const id = params.get("id");
@@ -860,7 +906,7 @@ export default function PdfEditor() {
     };
 
     const handleSaveReturn = async () => {
-        if (!pdfBytes || !documentId) return;
+        if (!pdfBytes) return;
         setStatusMessage("Saving…");
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
@@ -912,6 +958,45 @@ export default function PdfEditor() {
             });
 
             const bytes = await doc.save();
+
+            // In inline mode, send edited PDF back via postMessage or browser callback
+            const win = window as any;
+            if (win.__INLINE_MODE__) {
+                let binary = "";
+                const chunk = 8192;
+                for (let i = 0; i < bytes.length; i += chunk) {
+                    binary += String.fromCharCode(...bytes.slice(i, i + chunk));
+                }
+                const base64 = btoa(binary);
+                if (window.ReactNativeWebView?.postMessage) {
+                    window.ReactNativeWebView.postMessage(
+                        JSON.stringify({ type: "SAVED", pdfBase64: base64, fileName }),
+                    );
+                }
+                // Browser mode: POST edited PDF to callback URL
+                if (win.__INLINE_CALLBACK_URL__) {
+                    try {
+                        const resp = await fetch(win.__INLINE_CALLBACK_URL__, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                pdfBase64: base64,
+                                fileName,
+                                documentId: win.__INLINE_DOCUMENT_ID__,
+                            }),
+                        });
+                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    } catch (e) {
+                        console.error("Callback failed:", e);
+                        setStatusMessage("Save failed.");
+                        return;
+                    }
+                }
+                setStatusMessage("Saved.");
+                setTimeout(() => window.close(), 1500);
+                return;
+            }
+
             const blob = new Blob([bytes as any], { type: "application/pdf" });
             const fd = new FormData();
             fd.append("file", blob, fileName);
@@ -1415,7 +1500,7 @@ const STYLES = `
     font-size:12.5px; font-weight:500; border-bottom:1px solid #f3e7c4; }
 
 .viewport { flex:1; overflow-y:auto; overflow-x:auto; display:flex;
-    flex-direction:column; align-items:center; padding:28px 12px 60px; gap:24px; }
+    flex-direction:column; align-items:flex-start; padding:28px 12px 60px; gap:24px; }
 
 .empty-state { margin-top:14vh; max-width:360px; text-align:center; color:var(--text-soft); }
 .empty-icon { display:inline-flex; align-items:center; justify-content:center;
@@ -1427,7 +1512,7 @@ const STYLES = `
 
 .sheet { position:relative; background:var(--surface); border-radius:var(--radius);
     border:1px solid var(--border); box-shadow:0 12px 28px rgba(16,17,22,.08);
-    overflow:hidden; flex-shrink:0; }
+    overflow:hidden; flex-shrink:0; margin:0 auto; }
 .sheet-label { position:absolute; top:10px; left:10px;
     background:rgba(22,23,28,.78); color:#fff; padding:3px 9px; border-radius:999px;
     font-size:10.5px; font-weight:600; letter-spacing:.02em; z-index:5; backdrop-filter:blur(2px); }
