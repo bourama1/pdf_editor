@@ -25,12 +25,7 @@
             "label": "package: exe",
             "type": "process",
             "command": "node",
-            "args": [
-                "node_modules/@yao-pkg/pkg/lib-es5/bin.js",
-                "dist/server.js",
-                "--output",
-                "pdf-editor.exe"
-            ],
+            "args": ["node_modules/@yao-pkg/pkg/lib-es5/bin.js", "dist/server.js", "--output", "pdf-editor.exe"],
             "options": {
                 "cwd": "${workspaceFolder}/backend"
             },
@@ -39,11 +34,7 @@
         },
         {
             "label": "full build (frontend + tsc + exe)",
-            "dependsOn": [
-                "build: frontend",
-                "build: backend (tsc)",
-                "package: exe"
-            ],
+            "dependsOn": ["build: frontend", "build: backend (tsc)", "package: exe"],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
@@ -77,6 +68,26 @@
             "command": "if exist public rmdir /s /q public & if exist dist rmdir /s /q dist & if exist pdf-editor.exe del /q pdf-editor.exe",
             "options": {
                 "cwd": "${workspaceFolder}/backend"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "deploy: to consumers",
+            "type": "shell",
+            "command": "Copy-Item \"backend/public/index.html\" \"../paperless/paperless_mobile/assets/editor/index.html\" && Copy-Item \"backend/public/index.html\" \"../paperless/paperless_mobile/public/editor/index.html\" && Copy-Item \"backend/public/index.html\" \"../orderdesk/static/editor.html\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "build + deploy",
+            "dependsOn": ["build: frontend", "deploy: to consumers"],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
             },
             "problemMatcher": []
         }
