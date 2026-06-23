@@ -61,6 +61,8 @@ interface Session {
     returnUrl: string;
     createdAt: Date;
     savePath?: string; // network share path to write edited PDF
+    callbackUrl?: string; // backend URL to notify after save
+    documentId?: number; // paperless document ID
 }
 
 const sessions = new Map<string, Session>();
@@ -128,7 +130,7 @@ app.post("/upload", upload.single("file"), (req, res) => {
 // POST /edit-from-docmgr – accept a doc_manager URL, download PDF, create session,
 // save edited PDF to network share path, return edit URL
 app.post("/edit-from-docmgr", async (req, res) => {
-    const { docmgrUrl, filename, saveDir, saveFilename } = req.body;
+    const { docmgrUrl, filename, returnUrl, callbackUrl, documentId } = req.body;
 
     if (!docmgrUrl || !filename) {
         return res.status(400).json({ error: "docmgrUrl and filename are required" });
@@ -136,7 +138,7 @@ app.post("/edit-from-docmgr", async (req, res) => {
 
     try {
         console.log(`[edit-from-docmgr] Downloading ${docmgrUrl}`);
-        const pdfResponse = await fetch(docmgrUrl, { timeout: 30000 });
+        const pdfResponse = await fetch(docmgrUrl, { signal: AbortSignal.timeout(30000) });
         if (!pdfResponse.ok) {
             return res.status(502).json({ error: `doc_manager returned ${pdfResponse.status}` });
         }
@@ -149,27 +151,22 @@ app.post("/edit-from-docmgr", async (req, res) => {
         const filePath = path.join(uploadDir, `${id}_${filename}`);
         fs.writeFileSync(filePath, pdfBuffer);
 
-        const savePath = saveDir && saveFilename
-            ? path.join(saveDir, saveFilename)
-            : undefined;
-
         sessions.set(id, {
             id,
             fileName: filename,
             originalPath: filePath,
-            returnUrl: "",
+            returnUrl: returnUrl || "app",
             createdAt: new Date(),
-            savePath,
+            savePath: undefined,
+            callbackUrl,
+            documentId,
         });
+        console.log(`[edit-from-docmgr] Session ${id} created, callbackUrl: ${callbackUrl || "none"}`);
 
-        // If savePath was provided, ensure the directory exists
-        if (savePath) {
-            try { fs.mkdirSync(path.dirname(savePath), { recursive: true }); } catch { /* ignore */ }
-        }
-
-        const editUrl = process.env.FRONTEND_URL
-            ? `${process.env.FRONTEND_URL.replace(/\/+$/, "")}/?session=${id}`
-            : `${req.protocol}://${req.get("host")}/?session=${id}`;
+        const editUrl =
+            process.env.FRONTEND_URL ?
+                `${process.env.FRONTEND_URL.replace(/\/+$/, "")}/?session=${id}`
+            :   `${req.protocol}://${req.get("host")}/?session=${id}`;
 
         res.json({ id, editUrl });
     } catch (err: any) {
@@ -222,31 +219,45 @@ app.post("/sessions/:id/save", upload.single("file"), async (req, res) => {
         }
     }
 
-    // Try to forward to returnUrl if one exists
-    let forwarded = false;
-    if (session.returnUrl && session.returnUrl !== "null") {
-        console.log(`[save] Forwarding ${req.file.filename} to ${session.returnUrl}`);
-        try {
-            const pdfBuffer = fs.readFileSync(req.file.path);
-            const response = await fetch(session.returnUrl, {
-                method: "POST",
-                body: pdfBuffer,
-                headers: { "Content-Type": "application/pdf" },
-            });
-            console.log(`[save] Origin responded ${response.status}`);
-            forwarded = response.ok;
-        } catch (err: any) {
-            console.log(`[save] Forward error: ${err.message}`);
-        }
-    } else {
-        console.log(`[save] No returnUrl – returning PDF directly`);
+    // Forward to returnUrl in background (fire-and-forget, don't block the response)
+    const savedFilePath = req.file.path;
+    if (session.returnUrl && session.returnUrl !== "null" && session.returnUrl !== "app") {
+        console.log(`[save] Forwarding to ${session.returnUrl}`);
+        (async () => {
+            try {
+                const pdfBuffer = fs.readFileSync(savedFilePath);
+                const response = await fetch(session.returnUrl, {
+                    method: "POST",
+                    body: pdfBuffer,
+                    headers: { "Content-Type": "application/pdf" },
+                });
+                console.log(`[save] Forward responded ${response.status}`);
+            } catch (err: any) {
+                console.log(`[save] Forward error: ${err.message}`);
+            }
+        })();
     }
 
-    // Always return the PDF to the caller (frontend downloads it)
-    res.set("X-Forward-Status", forwarded ? "ok" : "none");
-    res.contentType("application/pdf");
-    res.attachment(`edited_${session.fileName}`);
-    res.sendFile(req.file.path);
+    // Notify callbackUrl (paperless backend) that save is done, fire-and-forget
+    const cbUrl = session.callbackUrl;
+    if (cbUrl) {
+        console.log(`[save] Notifying callback ${cbUrl}`);
+        (async () => {
+            try {
+                await fetch(cbUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ sessionId: session.id, documentId: session.documentId }),
+                });
+                console.log(`[save] Callback notified successfully`);
+            } catch (err: any) {
+                console.log(`[save] Callback error: ${err.message}`);
+            }
+        })();
+    }
+
+    // Return JSON so the frontend doesn't download the PDF as a file
+    res.json({ ok: true });
 });
 
 // Expose internal document database architecture arrays
