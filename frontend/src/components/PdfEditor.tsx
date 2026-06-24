@@ -9,12 +9,12 @@ import {
     Redo2,
     Trash2,
     Download,
-    UploadCloud,
     FileText,
     ZoomIn,
     ZoomOut,
     Type,
 } from "lucide-react";
+import { t } from "../i18n";
 
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -198,7 +198,7 @@ function PdfPage({
 
     return (
         <div className="sheet" style={{ width: dim.width, height: dim.height }}>
-            <div className="sheet-label">Page {pageNum}</div>
+            <div className="sheet-label">{t("page.label", { pageNum })}</div>
             <canvas ref={canvasRef} className="sheet-canvas" />
 
             {/* SVG for pen / highlight drawing — sits BELOW text boxes */}
@@ -314,7 +314,7 @@ function PdfPage({
                                 onClick={(e) => e.stopPropagation()}
                             />
                         :   <div className="tb-display">
-                                {tb.text ? tb.text : <span className="tb-placeholder">Type here…</span>}
+                                {tb.text ? tb.text : <span className="tb-placeholder">{t("textbox.placeholder")}</span>}
                             </div>
                         }
                     </div>
@@ -338,7 +338,7 @@ function PdfPage({
 export default function PdfEditor() {
     const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
     const [pdfDocument, setPdfDocument] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
-    const [fileName, setFileName] = useState("document.pdf");
+    const [fileName, setFileName] = useState(t("filename.default"));
     const [documentId, setDocumentId] = useState<string | null>(null);
     const [returnUrl, setReturnUrl] = useState<string | null>(null);
     const [numPages, setNumPages] = useState(0);
@@ -378,6 +378,12 @@ export default function PdfEditor() {
     const activePageRef = useRef<number | null>(null);
     const currentPointsRef = useRef<Point[]>([]);
     const [statusMessage, setStatusMessage] = useState("");
+
+    useEffect(() => {
+        if (!statusMessage) return;
+        const id = setTimeout(() => setStatusMessage(""), 4000);
+        return () => clearTimeout(id);
+    }, [statusMessage]);
 
     const [isTouchDevice, setIsTouchDevice] = useState(false);
     const viewportRef = useRef<HTMLDivElement>(null);
@@ -445,9 +451,9 @@ export default function PdfEditor() {
         const tryInline = () => {
             const inlineData = win.__INLINE_PDF_DATA__ as string | undefined;
             if (!inlineData) return false;
-            setFileName(win.__INLINE_FILE_NAME__ || "document.pdf");
+            setFileName(win.__INLINE_FILE_NAME__ || t("filename.default"));
             setReturnUrl("app");
-            setStatusMessage("Loading document…");
+            setStatusMessage(t("status.loading"));
             try {
                 const binaryStr = atob(inlineData);
                 const bytes = new Uint8Array(binaryStr.length);
@@ -465,11 +471,11 @@ export default function PdfEditor() {
                         setTbHistory([[]]);
                         setTbIdx(0);
                         setManualScale(null);
-                        setStatusMessage("Document loaded.");
+                        setStatusMessage(t("status.loaded"));
                     })
-                    .catch(() => setStatusMessage("Couldn't load that document."));
+                    .catch(() => setStatusMessage(t("status.loadFailed")));
             } catch {
-                setStatusMessage("Couldn't load PDF data.");
+                setStatusMessage(t("status.loadDataFailed"));
             }
             return true;
         };
@@ -495,7 +501,7 @@ export default function PdfEditor() {
 
         if (sessionId) {
             setDocumentId(sessionId);
-            setStatusMessage("Loading document…");
+            setStatusMessage(t("status.loading"));
             fetch(`/sessions/${sessionId}/info`)
                 .then((r) => {
                     if (!r.ok) throw new Error();
@@ -520,14 +526,14 @@ export default function PdfEditor() {
                     setTbHistory([[]]);
                     setTbIdx(0);
                     setManualScale(null);
-                    setStatusMessage("Document loaded.");
+                    setStatusMessage(t("status.loaded"));
                 })
-                .catch(() => setStatusMessage("Couldn't load that document."));
+                .catch(() => setStatusMessage(t("status.loadFailed")));
             return;
         }
 
         if (!pdfUrl) return;
-        setStatusMessage("Loading document…");
+        setStatusMessage(t("status.loading"));
         fetch(pdfUrl)
             .then((r) => {
                 if (!r.ok) throw new Error();
@@ -535,7 +541,7 @@ export default function PdfEditor() {
             })
             .then(async (buf) => {
                 setPdfBytes(buf);
-                setFileName(pdfUrl.split("/").pop() || "document.pdf");
+                setFileName(pdfUrl.split("/").pop() || t("filename.default"));
                 const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf.slice(0)) }).promise;
                 setPdfDocument(pdf);
                 setNumPages(pdf.numPages);
@@ -544,9 +550,9 @@ export default function PdfEditor() {
                 setTbHistory([[]]);
                 setTbIdx(0);
                 setManualScale(null);
-                setStatusMessage("Document loaded.");
+                setStatusMessage(t("status.loaded"));
             })
-            .catch(() => setStatusMessage("Couldn't load that document."));
+            .catch(() => setStatusMessage(t("status.loadFailed")));
     }, []);
 
     // ── commit helpers ────────────────────────────────────────────────
@@ -907,7 +913,7 @@ export default function PdfEditor() {
 
     const handleSaveReturn = async () => {
         if (!pdfBytes) return;
-        setStatusMessage("Saving…");
+        setStatusMessage(t("status.saving"));
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
             const pages = doc.getPages();
@@ -988,11 +994,11 @@ export default function PdfEditor() {
                         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                     } catch (e) {
                         console.error("Callback failed:", e);
-                        setStatusMessage("Save failed.");
+                        setStatusMessage(t("status.saveFailed"));
                         return;
                     }
                 }
-                setStatusMessage("Saved.");
+                setStatusMessage(t("status.saved"));
                 setTimeout(() => window.close(), 1500);
                 return;
             }
@@ -1007,11 +1013,11 @@ export default function PdfEditor() {
             });
 
             if (!res.ok) {
-                setStatusMessage("Save failed.");
+                setStatusMessage(t("status.saveFailed"));
                 return;
             }
 
-            setStatusMessage("Saved.");
+            setStatusMessage(t("status.saved"));
 
             // Notify the opener window (opened via window.open from the app) so
             // it can refresh the PDF, then close this tab.
@@ -1029,7 +1035,7 @@ export default function PdfEditor() {
             }, 1500);
         } catch (err) {
             console.error(err);
-            setStatusMessage("Save failed. Please try again.");
+            setStatusMessage(t("status.saveFailedLong"));
         }
     };
 
@@ -1052,7 +1058,7 @@ export default function PdfEditor() {
 
     const handleExport = async () => {
         if (!pdfBytes) return;
-        setStatusMessage("Exporting PDF…");
+        setStatusMessage(t("status.exporting"));
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
             const pages = doc.getPages();
@@ -1121,41 +1127,16 @@ export default function PdfEditor() {
                     method: "POST",
                     body: fd,
                 });
-                setStatusMessage(res.ok ? "Changes saved." : "Save failed.");
+                setStatusMessage(res.ok ? t("status.changesSaved") : t("status.saveFailed"));
                 if (res.ok && window.ReactNativeWebView?.postMessage) {
                     window.ReactNativeWebView.postMessage(JSON.stringify({ type: "SAVED" }));
                 }
             } else {
-                setStatusMessage("Document exported.");
+                setStatusMessage(t("status.exported"));
             }
         } catch (err) {
             console.error(err);
-            setStatusMessage("Export failed. Please try again.");
-        }
-    };
-
-    const handleFileLoad = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        setFileName(file.name);
-        setReturnUrl(null);
-        setHistory([[]]);
-        setHIdx(0);
-        setTbHistory([[]]);
-        setTbIdx(0);
-        setTool(null);
-        setManualScale(null);
-        setSelectedId(null);
-        setEditingId(null);
-        const buf = await file.arrayBuffer();
-        setPdfBytes(buf);
-        try {
-            const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf.slice(0)) }).promise;
-            setPdfDocument(pdf);
-            setNumPages(pdf.numPages);
-            setStatusMessage("Document loaded.");
-        } catch {
-            setStatusMessage("That file couldn't be opened.");
+            setStatusMessage(t("status.exportFailed"));
         }
     };
 
@@ -1179,7 +1160,7 @@ export default function PdfEditor() {
                             <FileText size={18} strokeWidth={2.25} />
                         </span>
                         <span className="brand-text">
-                            <span className="brand-title">PDF Studio</span>
+                            <span className="brand-title">{t("brand.title")}</span>
                             {hasDoc && (
                                 <span className="brand-file" title={fileName}>
                                     {fileName}
@@ -1188,17 +1169,6 @@ export default function PdfEditor() {
                         </span>
                     </div>
                     <div className="toolbar-actions">
-                        <label className="btn btn-ghost file-btn">
-                            <UploadCloud size={16} />
-                            <span className="btn-label">Open PDF</span>
-                            <input
-                                type="file"
-                                accept="application/pdf"
-                                onChange={handleFileLoad}
-                                className="file-input"
-                            />
-                        </label>
-
                         {hasDoc && (
                             <>
                                 <div className="seg-group" role="group">
@@ -1208,7 +1178,7 @@ export default function PdfEditor() {
                                             onClick={() => setTool(null)}
                                             className={`seg-btn ${!tool ? "seg-btn-active" : ""}`}>
                                             <Hand size={16} />
-                                            <span className="btn-label">Pan</span>
+                                            <span className="btn-label">{t("toolbar.pan")}</span>
                                         </button>
                                     )}
                                     <button
@@ -1216,21 +1186,21 @@ export default function PdfEditor() {
                                         onClick={() => handleToolSelect("pen")}
                                         className={`seg-btn ${tool === "pen" ? "seg-btn-active" : ""}`}>
                                         <PenLine size={16} />
-                                        <span className="btn-label">Pen</span>
+                                        <span className="btn-label">{t("toolbar.pen")}</span>
                                     </button>
                                     <button
                                         type="button"
                                         onClick={() => handleToolSelect("highlighter")}
                                         className={`seg-btn ${tool === "highlighter" ? "seg-btn-active" : ""}`}>
                                         <Highlighter size={16} />
-                                        <span className="btn-label">Highlight</span>
+                                        <span className="btn-label">{t("toolbar.highlight")}</span>
                                     </button>
                                     <button
                                         type="button"
                                         onClick={() => handleToolSelect("text")}
                                         className={`seg-btn ${tool === "text" ? "seg-btn-active" : ""}`}>
                                         <Type size={16} />
-                                        <span className="btn-label">Text</span>
+                                        <span className="btn-label">{t("toolbar.text")}</span>
                                     </button>
                                 </div>
 
@@ -1240,7 +1210,7 @@ export default function PdfEditor() {
                                         onClick={undo}
                                         disabled={!canUndo}
                                         className="icon-btn"
-                                        title="Undo (Ctrl+Z)">
+                                        title={t("toolbar.undo")}>
                                         <Undo2 size={17} />
                                     </button>
                                     <button
@@ -1248,7 +1218,7 @@ export default function PdfEditor() {
                                         onClick={redo}
                                         disabled={!canRedo}
                                         className="icon-btn"
-                                        title="Redo (Ctrl+Shift+Z)">
+                                        title={t("toolbar.redo")}>
                                         <Redo2 size={17} />
                                     </button>
                                     <button
@@ -1256,7 +1226,7 @@ export default function PdfEditor() {
                                         onClick={handleClearAll}
                                         disabled={!annotations.length && !textBoxes.length}
                                         className="icon-btn icon-btn-danger"
-                                        title="Clear all">
+                                        title={t("toolbar.clearAll")}>
                                         <Trash2 size={17} />
                                     </button>
                                 </div>
@@ -1266,7 +1236,7 @@ export default function PdfEditor() {
                                         <ZoomOut size={17} />
                                     </button>
                                     <button type="button" onClick={toggleFit} className="zoom-label">
-                                        {manualScale === null ? "Fit" : `${Math.round(manualScale * 100)}%`}
+                                        {manualScale === null ? t("toolbar.fit") : `${Math.round(manualScale * 100)}%`}
                                     </button>
                                     <button type="button" onClick={zoomIn} className="icon-btn">
                                         <ZoomIn size={17} />
@@ -1276,11 +1246,11 @@ export default function PdfEditor() {
                                 {returnUrl ?
                                     <button type="button" onClick={handleSaveReturn} className="btn btn-primary">
                                         <Download size={16} />
-                                        <span className="btn-label">Save &amp; Return</span>
+                                        <span className="btn-label">{t("toolbar.saveReturn")}</span>
                                     </button>
                                 :   <button type="button" onClick={handleExport} className="btn btn-primary">
                                         <Download size={16} />
-                                        <span className="btn-label">Export PDF</span>
+                                        <span className="btn-label">{t("toolbar.exportPdf")}</span>
                                     </button>
                                 }
                             </>
@@ -1310,7 +1280,7 @@ export default function PdfEditor() {
                             </div>
                         </div>
                         <div className="config-item config-item-grow">
-                            <span className="config-label">Thickness</span>
+                            <span className="config-label">{t("config.thickness")}</span>
                             <input
                                 type="range"
                                 min="1"
@@ -1321,14 +1291,16 @@ export default function PdfEditor() {
                             />
                             <span className="config-value">{strokeWidth}px</span>
                         </div>
-                        <span className="badge">{tool === "pen" ? "Pen" : "Highlighter"} active</span>
+                        <span className="badge">
+                            {tool === "pen" ? t("badge.penActive") : t("badge.highlightActive")}
+                        </span>
                     </div>
                 )}
 
                 {hasDoc && isTextMode && (
                     <div className="config-bar">
                         <div className="config-item">
-                            <span className="config-label">Color</span>
+                            <span className="config-label">{t("config.color")}</span>
                             <div className="swatches">
                                 {COLOR_PRESETS.map((c) => (
                                     <button
@@ -1347,7 +1319,7 @@ export default function PdfEditor() {
                             </div>
                         </div>
                         <div className="config-item config-item-grow">
-                            <span className="config-label">Font size</span>
+                            <span className="config-label">{t("config.fontSize")}</span>
                             <input
                                 type="range"
                                 min="8"
@@ -1360,10 +1332,10 @@ export default function PdfEditor() {
                         </div>
                         <span className="badge">
                             {editingId ?
-                                "Editing — click outside to finish"
+                                t("badge.editing")
                             : selectedId ?
-                                "Selected — click to edit · drag to move · Delete to remove"
-                            :   "Click on page to add text"}
+                                t("badge.selected")
+                            :   t("badge.clickToAdd")}
                         </span>
                     </div>
                 )}
@@ -1377,10 +1349,8 @@ export default function PdfEditor() {
                         <div className="empty-icon">
                             <FileText size={28} strokeWidth={1.5} />
                         </div>
-                        <p className="empty-title">No PDF open yet</p>
-                        <p className="empty-copy">
-                            Open a local file above, or load one with a <code>?pdfUrl=</code> link parameter.
-                        </p>
+                        <p className="empty-title">{t("empty.title")}</p>
+                        <p className="empty-copy">{t("empty.copy")}</p>
                     </div>
                 : containerWidth === 0 ?
                     null
@@ -1437,7 +1407,7 @@ const STYLES = `
 .toolbar { background:var(--surface); border-bottom:1px solid var(--border);
     box-shadow:0 1px 0 rgba(16,17,22,.02); z-index:10; }
 .toolbar-row { display:flex; align-items:center; justify-content:space-between;
-    gap:16px; padding:12px 20px; flex-wrap:wrap; }
+    gap:16px; padding:12px 20px; flex-wrap:nowrap; }
 
 .brand { display:flex; align-items:center; gap:10px; min-width:0; }
 .brand-mark { display:flex; align-items:center; justify-content:center;
@@ -1447,7 +1417,7 @@ const STYLES = `
 .brand-file { font-size:12px; color:var(--text-soft); overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; max-width:220px; }
 
-.toolbar-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.toolbar-actions { display:flex; align-items:center; gap:10px; flex-wrap:nowrap; }
 .btn { display:inline-flex; align-items:center; gap:7px; padding:8px 14px;
     border-radius:9px; border:1px solid transparent; font-size:13px; font-weight:600;
     cursor:pointer; transition:background .15s,border-color .15s,transform .05s; white-space:nowrap; }
@@ -1456,9 +1426,6 @@ const STYLES = `
 .btn-ghost:hover { background:#f7f7f9; }
 .btn-primary { background:var(--accent); color:#fff; }
 .btn-primary:hover { background:#e0440f; }
-.file-btn { position:relative; }
-.file-input { position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; }
-
 .seg-group { display:flex; background:#eeeef2; border-radius:10px; padding:3px; gap:2px; }
 .seg-btn { display:inline-flex; align-items:center; gap:6px; padding:7px 12px;
     border:none; border-radius:8px; background:transparent; color:var(--text-soft);
@@ -1576,12 +1543,39 @@ const STYLES = `
     border-radius: 3px;
 }
 
-@media (max-width:720px) {
-    .toolbar-row { padding:10px 14px; }
+@media (max-width:1024px) {
+    .toolbar-actions { gap:6px; }
+    .btn { padding:6px 10px; }
+    .seg-group { padding:2px; gap:1px; }
+    .seg-btn { padding:4px 5px; gap:2px; font-size:12px; }
+    .icon-cluster { padding:2px; gap:1px; }
+    .icon-btn { width:26px; height:26px; }
+    .icon-btn svg { width:15px; height:15px; }
+    .zoom-label { min-width:30px; height:26px; font-size:10px; padding:0 3px; }
+    .badge { display:none; }
+    .config-bar { flex-wrap:nowrap; gap:12px; padding:8px 14px; }
+    .config-label { display:none; }
+    .swatch { width:14px; height:14px; }
+    .swatch-input { width:22px; height:22px; }
+    .config-value { min-width:26px; font-size:11px; }
+}
+
+@media (max-width:850px) {
     .btn-label { display:none; }
-    .btn { padding:8px 10px; }
-    .brand-file { max-width:120px; }
-    .config-bar { padding:10px 14px; gap:14px; }
-    .viewport { padding:18px 8px 48px; gap:16px; }
+}
+
+@media (max-width:720px) {
+    .brand-text { display:none; }
+    .toolbar-row { gap:6px; padding:8px 10px; }
+    .toolbar-actions { gap:3px; }
+    .btn { padding:5px 7px; }
+    .seg-btn { padding:3px 4px; font-size:11px; }
+    .icon-btn svg { width:13px; height:13px; }
+    .zoom-label { min-width:26px; height:22px; font-size:9px; padding:0 2px; }
+    .swatch { width:12px; height:12px; }
+    .swatch-input { width:20px; height:20px; }
+    .config-value { min-width:24px; font-size:10px; }
+    .config-bar { gap:6px; padding:6px 10px; }
+    .viewport { padding:14px 6px 36px; gap:12px; }
 }
 `;
