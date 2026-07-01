@@ -445,6 +445,62 @@ export default function PdfEditor() {
     );
     const toggleFit = useCallback(() => setManualScale((p) => (p === null ? 1 : null)), []);
 
+    // ── pinch zoom (mobile) ────────────────────────────────────────────
+    const scaleRef = useRef(1);
+    useEffect(() => {
+        scaleRef.current = manualScale ?? getEffectiveScale();
+    }, [manualScale, getEffectiveScale]);
+
+    const pagesWrapRef = useRef<HTMLDivElement>(null);
+    const pinchRef = useRef<{ startDist: number; startScale: number } | null>(null);
+
+    const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length === 2) {
+            e.preventDefault();
+            const dist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY,
+            );
+            pinchRef.current = { startDist: dist, startScale: scaleRef.current };
+            if (pagesWrapRef.current) {
+                pagesWrapRef.current.style.transformOrigin = "0 0";
+            }
+        }
+    }, []);
+
+    const handleTouchMove = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length !== 2 || !pinchRef.current) {
+            if (e.touches.length !== 2) pinchRef.current = null;
+            return;
+        }
+        e.preventDefault();
+        const dist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY,
+        );
+        const ratio = dist / pinchRef.current.startDist;
+        const newScale = Math.min(4, Math.max(0.2, Math.round(pinchRef.current.startScale * ratio * 100) / 100));
+        if (pagesWrapRef.current) {
+            pagesWrapRef.current.style.transform = `scale(${newScale / pinchRef.current.startScale})`;
+        }
+        pendingScaleRef.current = newScale;
+    }, []);
+
+    const pendingScaleRef = useRef<number | null>(null);
+
+    const handleTouchEnd = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
+        if (e.touches.length === 0) {
+            pinchRef.current = null;
+            if (pagesWrapRef.current) {
+                pagesWrapRef.current.style.transform = "none";
+            }
+            if (pendingScaleRef.current !== null) {
+                setManualScale(pendingScaleRef.current);
+                pendingScaleRef.current = null;
+            }
+        }
+    }, []);
+
     // ── initial load ──────────────────────────────────────────────────
     useEffect(() => {
         const win = window as any;
@@ -594,6 +650,7 @@ export default function PdfEditor() {
                     y: tb.y * sy,
                     w: tb.w * sx,
                     h: tb.h * sy,
+                    fontSize: tb.fontSize * Math.min(sx, sy),
                     pageWidth: d.width,
                     pageHeight: d.height,
                 };
@@ -715,19 +772,20 @@ export default function PdfEditor() {
             }
             // Create new text box
             const pt = getSvgCoords(e, page);
-            const dim = pageDimRef.current[page] || { width: 600, height: 800 };
+            const dim = pageDimRef.current[page] || { width: 600, height: 800, nativeWidth: 600, nativeHeight: 800 };
+            const toNative = (v: number, zoomed: number, native: number) => v * (native / zoomed);
             const nb: TextBox = {
                 id: uid(),
                 page,
-                x: pt.x,
-                y: pt.y,
-                w: 220,
-                h: 80,
+                x: toNative(pt.x, dim.width, dim.nativeWidth),
+                y: toNative(pt.y, dim.height, dim.nativeHeight),
+                w: 100,
+                h: Math.round(textFontSize * 1.5),
                 text: "",
                 fontSize: textFontSize,
                 color: textColor,
-                pageWidth: dim.width,
-                pageHeight: dim.height,
+                pageWidth: dim.nativeWidth,
+                pageHeight: dim.nativeHeight,
             };
             const next = [...liveTbRef.current, nb];
             commitTextBoxes(next);
@@ -805,6 +863,7 @@ export default function PdfEditor() {
         const ny = d ? tb.y * (d.height / tb.pageHeight) : tb.y;
         const nw = d ? tb.w * (d.width / tb.pageWidth) : tb.w;
         const nh = d ? tb.h * (d.height / tb.pageHeight) : tb.h;
+        const nFontSize = d ? tb.fontSize * Math.min(d.width / tb.pageWidth, d.height / tb.pageHeight) : tb.fontSize;
         // Update liveTbRef so rendering during drag uses normalized values
         const updated = {
             ...tb,
@@ -812,6 +871,7 @@ export default function PdfEditor() {
             y: ny,
             w: nw,
             h: nh,
+            fontSize: nFontSize,
             pageWidth: d?.width ?? tb.pageWidth,
             pageHeight: d?.height ?? tb.pageHeight,
         };
@@ -838,12 +898,14 @@ export default function PdfEditor() {
         const ny = d ? tb.y * (d.height / tb.pageHeight) : tb.y;
         const nw = d ? tb.w * (d.width / tb.pageWidth) : tb.w;
         const nh = d ? tb.h * (d.height / tb.pageHeight) : tb.h;
+        const nFontSize = d ? tb.fontSize * Math.min(d.width / tb.pageWidth, d.height / tb.pageHeight) : tb.fontSize;
         const updated = {
             ...tb,
             x: nx,
             y: ny,
             w: nw,
             h: nh,
+            fontSize: nFontSize,
             pageWidth: d?.width ?? tb.pageWidth,
             pageHeight: d?.height ?? tb.pageHeight,
         };
@@ -863,7 +925,18 @@ export default function PdfEditor() {
 
     const handleBoxClick = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        // If already selected → enter edit mode on click
+        // Commit in-progress edit before switching
+        if (editingId && editingId !== id) {
+            commitTextBoxes([...liveTbRef.current]);
+        }
+        const tb = liveTbRef.current.find((t) => t.id === id);
+        if (!tb) return;
+        // Sync toolbar to this box's settings (only affects new boxes)
+        // Convert stored (possibly zoom-normalized) fontSize back to native space
+        const dim = pageDimRef.current[tb.page];
+        const nativeFontSize = dim ? tb.fontSize * (dim.nativeWidth / tb.pageWidth) : tb.fontSize;
+        setTextFontSize(Math.round(nativeFontSize));
+        setTextColor(tb.color);
         if (selectedId === id) {
             setEditingId(id);
         } else {
@@ -1343,7 +1416,13 @@ export default function PdfEditor() {
 
             {statusMessage && <div className="status-bar">{statusMessage}</div>}
 
-            <div className="viewport" ref={viewportRef} onPointerDown={handleViewportPointerDown}>
+            <div
+                className="viewport"
+                ref={viewportRef}
+                onPointerDown={handleViewportPointerDown}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}>
                 {!hasDoc ?
                     <div className="empty-state">
                         <div className="empty-icon">
@@ -1354,36 +1433,38 @@ export default function PdfEditor() {
                     </div>
                 : containerWidth === 0 ?
                     null
-                :   Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
-                        <PdfPage
-                            key={`${pageNum}-${sizing.mode}-${Math.round(sizing.mode === "fit" ? sizing.targetWidth : sizing.scale * 100)}`}
-                            pageNum={pageNum}
-                            pdfDocument={pdfDocument!}
-                            sizing={sizing}
-                            isDrawMode={isDrawMode}
-                            isTextMode={isTextMode}
-                            annotations={annotations}
-                            textBoxes={renderBoxes}
-                            isDrawing={isDrawing}
-                            activePage={activePage}
-                            currentPathD={currentPathD}
-                            currentColor={color}
-                            currentStrokeWidth={strokeWidth}
-                            currentTool={tool}
-                            selectedId={selectedId}
-                            editingId={editingId}
-                            onDimensionsUpdate={(p, w, h, nw, nh) => {
-                                pageDimRef.current[p] = { width: w, height: h, nativeWidth: nw, nativeHeight: nh };
-                            }}
-                            onBoxPointerDown={handleBoxPointerDown}
-                            onHandlePointerDown={handleHandlePointerDown}
-                            onBoxClick={handleBoxClick}
-                            onTextChange={handleTextChange}
-                            onSvgPointerDown={handleSvgPointerDown}
-                            onSvgPointerMove={handleSvgPointerMove}
-                            onSvgPointerUp={handleSvgPointerUp}
-                        />
-                    ))
+                :   <div ref={pagesWrapRef} style={{ display: "inline-flex", flexDirection: "column" }}>
+                        {Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
+                            <PdfPage
+                                key={`${pageNum}-${sizing.mode}-${Math.round(sizing.mode === "fit" ? sizing.targetWidth : sizing.scale * 100)}`}
+                                pageNum={pageNum}
+                                pdfDocument={pdfDocument!}
+                                sizing={sizing}
+                                isDrawMode={isDrawMode}
+                                isTextMode={isTextMode}
+                                annotations={annotations}
+                                textBoxes={renderBoxes}
+                                isDrawing={isDrawing}
+                                activePage={activePage}
+                                currentPathD={currentPathD}
+                                currentColor={color}
+                                currentStrokeWidth={strokeWidth}
+                                currentTool={tool}
+                                selectedId={selectedId}
+                                editingId={editingId}
+                                onDimensionsUpdate={(p, w, h, nw, nh) => {
+                                    pageDimRef.current[p] = { width: w, height: h, nativeWidth: nw, nativeHeight: nh };
+                                }}
+                                onBoxPointerDown={handleBoxPointerDown}
+                                onHandlePointerDown={handleHandlePointerDown}
+                                onBoxClick={handleBoxClick}
+                                onTextChange={handleTextChange}
+                                onSvgPointerDown={handleSvgPointerDown}
+                                onSvgPointerMove={handleSvgPointerMove}
+                                onSvgPointerUp={handleSvgPointerUp}
+                            />
+                        ))}
+                    </div>
                 }
             </div>
         </div>
@@ -1466,7 +1547,7 @@ const STYLES = `
 .status-bar { padding:8px 20px; background:#fff8e8; color:#8a6300;
     font-size:12.5px; font-weight:500; border-bottom:1px solid #f3e7c4; }
 
-.viewport { flex:1; overflow-y:auto; overflow-x:auto; display:flex;
+.viewport { flex:1; overflow-y:auto; overflow-x:auto; display:flex; touch-action:pan-x pan-y;
     flex-direction:column; align-items:flex-start; padding:28px 12px 60px; gap:24px; }
 
 .empty-state { margin-top:14vh; max-width:360px; text-align:center; color:var(--text-soft); }
