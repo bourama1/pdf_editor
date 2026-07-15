@@ -169,7 +169,7 @@ function PdfPage({
                 const page = await pdfDocument.getPage(pageNum);
                 void page.rotate;
                 const base = page.getViewport({ scale: 1 });
-                const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap at 2x to avoid excessive memory
+                const dpr = window.devicePixelRatio || 1
                 const logicalScale = Math.min(3, Math.max(0.2, sizing.targetWidth / base.width));
                 const vp = page.getViewport({ scale: logicalScale * dpr });
                 if (!alive) return;
