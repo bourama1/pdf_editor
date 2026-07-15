@@ -167,21 +167,25 @@ function PdfPage({
         (async () => {
             try {
                 const page = await pdfDocument.getPage(pageNum);
-                // Access page.rotate to ensure lazy properties are loaded
                 void page.rotate;
                 const base = page.getViewport({ scale: 1 });
-                const scale =
+                const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap at 2x to avoid excessive memory
+                const logicalScale =
                     sizing.mode === "scale" ?
                         sizing.scale
                     :   Math.min(3, Math.max(0.2, sizing.targetWidth / base.width));
-                const vp = page.getViewport({ scale });
+                const vp = page.getViewport({ scale: logicalScale * dpr });
                 if (!alive) return;
-                setDim({ width: vp.width, height: vp.height });
-                onDimensionsUpdate(pageNum, vp.width, vp.height, base.width, base.height);
+                const logicalWidth = vp.width / dpr;
+                const logicalHeight = vp.height / dpr;
+                setDim({ width: Math.round(logicalWidth), height: Math.round(logicalHeight) });
+                onDimensionsUpdate(pageNum, Math.round(logicalWidth), Math.round(logicalHeight), base.width, base.height);
                 const canvas = canvasRef.current;
                 if (canvas) {
                     canvas.width = vp.width;
                     canvas.height = vp.height;
+                    canvas.style.width = Math.round(logicalWidth) + "px";
+                    canvas.style.height = Math.round(logicalHeight) + "px";
                     const ctx = canvas.getContext("2d");
                     if (ctx) await page.render({ canvasContext: ctx, viewport: vp }).promise;
                 }
