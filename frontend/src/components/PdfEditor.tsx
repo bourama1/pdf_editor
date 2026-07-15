@@ -66,7 +66,7 @@ interface Point {
 }
 
 type ToolType = "pen" | "highlighter" | "text" | null;
-type PageSizing = { mode: "fit"; targetWidth: number } | { mode: "scale"; scale: number };
+type PageSizing = { mode: "fit"; targetWidth: number };
 type HandlePos = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
 interface DragState {
@@ -160,7 +160,7 @@ function PdfPage({
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [dim, setDim] = useState({ width: 600, height: 800 });
 
-    const sizingKey = sizing.mode === "fit" ? `fit:${Math.round(sizing.targetWidth)}` : `scale:${sizing.scale}`;
+    const sizingKey = `fit:${Math.round(sizing.targetWidth)}`;
 
     useEffect(() => {
         let alive = true;
@@ -170,10 +170,7 @@ function PdfPage({
                 void page.rotate;
                 const base = page.getViewport({ scale: 1 });
                 const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap at 2x to avoid excessive memory
-                const logicalScale =
-                    sizing.mode === "scale" ?
-                        sizing.scale
-                    :   Math.min(3, Math.max(0.2, sizing.targetWidth / base.width));
+                const logicalScale = Math.min(3, Math.max(0.2, sizing.targetWidth / base.width));
                 const vp = page.getViewport({ scale: logicalScale * dpr });
                 if (!alive) return;
                 const logicalWidth = vp.width / dpr;
@@ -392,10 +389,13 @@ export default function PdfEditor() {
     const [isTouchDevice, setIsTouchDevice] = useState(false);
     const viewportRef = useRef<HTMLDivElement>(null);
     const [containerWidth, setContainerWidth] = useState(0);
-    const [manualScale, setManualScale] = useState<number | null>(null);
+    const [zoomFactor, setZoomFactor] = useState(1); // 1 = fit to width
+    const zoomFactorRef = useRef(1);
     const pageDimRef = useRef<
         Record<number, { width: number; height: number; nativeWidth: number; nativeHeight: number }>
     >({});
+
+    useEffect(() => { zoomFactorRef.current = zoomFactor; }, [zoomFactor]);
 
     const isDrawMode = tool === "pen" || tool === "highlighter";
     const isTextMode = tool === "text";
@@ -426,37 +426,56 @@ export default function PdfEditor() {
         return () => mq.removeEventListener("change", upd);
     }, []);
 
+    // Always render at fit scale — zoom is done via CSS transform only
     const sizing: PageSizing = useMemo(
-        () =>
-            manualScale === null ?
-                { mode: "fit", targetWidth: Math.max(240, containerWidth) }
-            :   { mode: "scale", scale: manualScale },
-        [manualScale, containerWidth],
+        () => ({ mode: "fit", targetWidth: Math.max(240, containerWidth) }),
+        [containerWidth],
     );
 
-    const getEffectiveScale = useCallback(() => {
+    const getEffectiveZoom = useCallback(() => {
         const f = pageDimRef.current[1];
-        return f?.nativeWidth ? f.width / f.nativeWidth : 1;
+        const fitScale = f?.nativeWidth ? f.width / f.nativeWidth : 1;
+        return zoomFactorRef.current * fitScale;
     }, []);
 
-    const zoomIn = useCallback(
-        () => setManualScale((p) => Math.min(4, Math.round(((p ?? getEffectiveScale()) + 0.15) * 100) / 100)),
-        [getEffectiveScale],
-    );
-    const zoomOut = useCallback(
-        () => setManualScale((p) => Math.max(0.2, Math.round(((p ?? getEffectiveScale()) - 0.15) * 100) / 100)),
-        [getEffectiveScale],
-    );
-    const toggleFit = useCallback(() => setManualScale((p) => (p === null ? 1 : null)), []);
+    const applyZoom = useCallback((z: number) => {
+        const clamped = Math.min(6, Math.max(0.2, z));
+        zoomFactorRef.current = clamped;
+        setZoomFactor(clamped);
+        if (pagesWrapRef.current) {
+            pagesWrapRef.current.style.transform = `scale(${clamped})`;
+        }
+    }, []);
+
+    const zoomIn = useCallback(() => {
+        const currentEffective = getEffectiveZoom();
+        const newEffective = Math.min(4, currentEffective + 0.15);
+        const f = pageDimRef.current[1];
+        const fitScale = f?.nativeWidth ? f.width / f.nativeWidth : 1;
+        applyZoom(newEffective / fitScale);
+    }, [getEffectiveZoom, applyZoom]);
+
+    const zoomOut = useCallback(() => {
+        const currentEffective = getEffectiveZoom();
+        const newEffective = Math.max(0.2, currentEffective - 0.15);
+        const f = pageDimRef.current[1];
+        const fitScale = f?.nativeWidth ? f.width / f.nativeWidth : 1;
+        applyZoom(newEffective / fitScale);
+    }, [getEffectiveZoom, applyZoom]);
+
+    const toggleFit = useCallback(() => {
+        if (zoomFactorRef.current === 1) {
+            const f = pageDimRef.current[1];
+            const fitScale = f?.nativeWidth ? f.width / f.nativeWidth : 1;
+            applyZoom(1 / fitScale);
+        } else {
+            applyZoom(1);
+        }
+    }, [applyZoom]);
 
     // ── pinch zoom (mobile) ────────────────────────────────────────────
-    const scaleRef = useRef(1);
-    useEffect(() => {
-        scaleRef.current = manualScale ?? getEffectiveScale();
-    }, [manualScale, getEffectiveScale]);
-
     const pagesWrapRef = useRef<HTMLDivElement>(null);
-    const pinchRef = useRef<{ startDist: number; startScale: number } | null>(null);
+    const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
 
     const handleTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
         if (e.touches.length === 2) {
@@ -465,7 +484,7 @@ export default function PdfEditor() {
                 e.touches[0].clientX - e.touches[1].clientX,
                 e.touches[0].clientY - e.touches[1].clientY,
             );
-            pinchRef.current = { startDist: dist, startScale: scaleRef.current };
+            pinchRef.current = { startDist: dist, startZoom: zoomFactorRef.current };
             if (pagesWrapRef.current) {
                 pagesWrapRef.current.style.transformOrigin = "0 0";
             }
@@ -483,27 +502,32 @@ export default function PdfEditor() {
             e.touches[0].clientY - e.touches[1].clientY,
         );
         const ratio = dist / pinchRef.current.startDist;
-        const newScale = Math.min(4, Math.max(0.2, Math.round(pinchRef.current.startScale * ratio * 100) / 100));
+        const newZoom = Math.min(6, Math.max(0.2, pinchRef.current.startZoom * ratio));
         if (pagesWrapRef.current) {
-            pagesWrapRef.current.style.transform = `scale(${newScale / pinchRef.current.startScale})`;
+            pagesWrapRef.current.style.transform = `scale(${newZoom})`;
         }
-        pendingScaleRef.current = newScale;
+        pendingZoomRef.current = newZoom;
     }, []);
 
-    const pendingScaleRef = useRef<number | null>(null);
+    const pendingZoomRef = useRef<number | null>(null);
+
+    // Sync CSS transform whenever pagesWrapRef is mounted or zoomFactor changes
+    useEffect(() => {
+        if (pagesWrapRef.current) {
+            pagesWrapRef.current.style.transformOrigin = "0 0";
+            pagesWrapRef.current.style.transform = `scale(${zoomFactorRef.current})`;
+        }
+    }, [zoomFactor]);
 
     const handleTouchEnd = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
         if (e.touches.length === 0) {
             pinchRef.current = null;
-            if (pagesWrapRef.current) {
-                pagesWrapRef.current.style.transform = "none";
-            }
-            if (pendingScaleRef.current !== null) {
-                setManualScale(pendingScaleRef.current);
-                pendingScaleRef.current = null;
+            if (pendingZoomRef.current !== null) {
+                applyZoom(pendingZoomRef.current);
+                pendingZoomRef.current = null;
             }
         }
-    }, []);
+    }, [applyZoom]);
 
     // ── initial load ──────────────────────────────────────────────────
     useEffect(() => {
@@ -530,7 +554,8 @@ export default function PdfEditor() {
                         setHIdx(0);
                         setTbHistory([[]]);
                         setTbIdx(0);
-                        setManualScale(null);
+                        setZoomFactor(1);
+                        zoomFactorRef.current = 1;
                         setStatusMessage(t("status.loaded"));
                     })
                     .catch(() => setStatusMessage(t("status.loadFailed")));
@@ -585,7 +610,8 @@ export default function PdfEditor() {
                     setHIdx(0);
                     setTbHistory([[]]);
                     setTbIdx(0);
-                    setManualScale(null);
+                    setZoomFactor(1);
+                    zoomFactorRef.current = 1;
                     setStatusMessage(t("status.loaded"));
                 })
                 .catch(() => setStatusMessage(t("status.loadFailed")));
@@ -609,7 +635,8 @@ export default function PdfEditor() {
                 setHIdx(0);
                 setTbHistory([[]]);
                 setTbIdx(0);
-                setManualScale(null);
+                setZoomFactor(1);
+                zoomFactorRef.current = 1;
                 setStatusMessage(t("status.loaded"));
             })
             .catch(() => setStatusMessage(t("status.loadFailed")));
@@ -712,8 +739,9 @@ export default function PdfEditor() {
         const onMove = (e: PointerEvent) => {
             const ds = dragRef.current;
             if (!ds) return;
-            const dx = e.clientX - ds.startMouseX;
-            const dy = e.clientY - ds.startMouseY;
+            const zoom = zoomFactorRef.current;
+            const dx = (e.clientX - ds.startMouseX) / zoom;
+            const dy = (e.clientY - ds.startMouseY) / zoom;
 
             liveTbRef.current = liveTbRef.current.map((tb) => {
                 if (tb.id !== ds.id) return tb;
@@ -1313,7 +1341,7 @@ export default function PdfEditor() {
                                         <ZoomOut size={17} />
                                     </button>
                                     <button type="button" onClick={toggleFit} className="zoom-label">
-                                        {manualScale === null ? t("toolbar.fit") : `${Math.round(manualScale * 100)}%`}
+                                        {zoomFactor === 1 ? t("toolbar.fit") : `${Math.round(getEffectiveZoom() * 100)}%`}
                                     </button>
                                     <button type="button" onClick={zoomIn} className="icon-btn">
                                         <ZoomIn size={17} />
@@ -1440,7 +1468,7 @@ export default function PdfEditor() {
                 :   <div ref={pagesWrapRef} style={{ display: "inline-flex", flexDirection: "column" }}>
                         {Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
                             <PdfPage
-                                key={`${pageNum}-${sizing.mode}-${Math.round(sizing.mode === "fit" ? sizing.targetWidth : sizing.scale * 100)}`}
+                                key={`${pageNum}-${Math.round(sizing.targetWidth)}`}
                                 pageNum={pageNum}
                                 pdfDocument={pdfDocument!}
                                 sizing={sizing}
