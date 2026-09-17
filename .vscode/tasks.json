@@ -12,6 +12,26 @@
             "problemMatcher": []
         },
         {
+            "label": "build: frontend (lib)",
+            "type": "shell",
+            "command": "npx vite build --config vite.lib.config.ts",
+            "options": {
+                "cwd": "${workspaceFolder}/frontend"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "prepare: lib for GitHub install",
+            "type": "shell",
+            "command": "npm run prepare",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
             "label": "build: backend (tsc)",
             "type": "shell",
             "command": "npx tsc",

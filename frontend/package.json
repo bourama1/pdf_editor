@@ -3,15 +3,24 @@
     "private": true,
     "version": "1.0.0",
     "type": "module",
+    "main": "./dist-lib/pdf-editor.js",
+    "module": "./dist-lib/pdf-editor.js",
+    "types": "./dist-lib/pdf-editor.d.ts",
+    "files": [
+        "dist-lib"
+    ],
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build",
+        "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts",
         "preview": "vite preview"
     },
     "dependencies": {
         "lucide-react": "^0.383.0",
         "pdf-lib": "^1.17.1",
-        "pdfjs-dist": "^4.3.136",
+        "pdfjs-dist": "^4.3.136"
+    },
+    "peerDependencies": {
         "react": "^18.3.1",
         "react-dom": "^18.3.1"
     },
@@ -19,8 +28,11 @@
         "@types/react": "^18.3.3",
         "@types/react-dom": "^18.3.0",
         "@vitejs/plugin-react": "^4.3.0",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
         "typescript": "^5.4.5",
         "vite": "^5.2.11",
+        "vite-plugin-dts": "^5.1.0",
         "vite-plugin-singlefile": "^2.3.3"
     }
 }

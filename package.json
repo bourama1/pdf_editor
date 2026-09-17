@@ -1,0 +1,16 @@
+{
+    "name": "pdf-editor",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "main": "./frontend/dist-lib/pdf-editor.js",
+    "module": "./frontend/dist-lib/pdf-editor.js",
+    "types": "./frontend/dist-lib/pdf-editor.d.ts",
+    "peerDependencies": {
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1"
+    },
+    "scripts": {
+        "prepare": "cd frontend && npm install --omit=peer && npm run build:lib && npm prune --omit=dev && node -e \"['node_modules/react','node_modules/react-dom'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
+    }
+}
