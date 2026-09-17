@@ -1,6 +1,5 @@
 node_modules
 dist/
-dist-lib/
 uploads/
 *.exe
 public
