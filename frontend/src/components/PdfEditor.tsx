@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import * as pdfjsLib from "pdfjs-dist";
 import {
     Hand,
@@ -18,6 +19,19 @@ import { t } from "../i18n";
 
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+// StandardFonts.Helvetica only supports WinAnsi encoding, which is missing
+// the caron/háček letters used in Czech (č, ř, š, ž, ě, ď, ť, ň), so text
+// boxes containing them threw on save. Embed a Unicode TTF via fontkit instead.
+import unicodeFontUrl from "dejavu-fonts-ttf/ttf/DejaVuSans.ttf?url";
+let unicodeFontBytesPromise: Promise<ArrayBuffer> | null = null;
+async function embedUnicodeFont(doc: PDFDocument) {
+    doc.registerFontkit(fontkit);
+    if (!unicodeFontBytesPromise) {
+        unicodeFontBytesPromise = fetch(unicodeFontUrl).then((r) => r.arrayBuffer());
+    }
+    return doc.embedFont(await unicodeFontBytesPromise, { subset: true });
+}
 
 const COLOR_PRESETS = [
     "#e03131",
@@ -1022,7 +1036,7 @@ export default function PdfEditor() {
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
             const pages = doc.getPages();
-            const font = await doc.embedFont(StandardFonts.Helvetica);
+            const font = await embedUnicodeFont(doc);
 
             annotations.forEach((ann) => {
                 const pg = pages[ann.page - 1];
@@ -1167,7 +1181,7 @@ export default function PdfEditor() {
         try {
             const doc = await PDFDocument.load(new Uint8Array(pdfBytes));
             const pages = doc.getPages();
-            const font = await doc.embedFont(StandardFonts.Helvetica);
+            const font = await embedUnicodeFont(doc);
 
             annotations.forEach((ann) => {
                 const pg = pages[ann.page - 1];
