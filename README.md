@@ -30,8 +30,22 @@ function App() {
 
 The component takes no props today — it's a fully self-contained editor
 (file picker, canvas, toolbar included). The bundle is a single ESM file
-(~765 KB gzipped) with the PDF.js worker inlined, so there's no separate
-worker asset to configure or serve.
+(~1.6 MB gzipped) with the PDF.js worker and a Unicode font (DejaVu Sans)
+inlined, so there's no separate asset to configure or serve.
+
+## Features
+
+- **Pen and highlighter** with color and thickness. Hold **Shift** while drawing
+  for a straight line; on touch devices use the **Přímka** toggle in the options bar.
+- **Eraser** — drag across a stroke to remove it.
+- **Text boxes** — click with the Text tool and type right away. The box widens
+  as you type and wraps at the page's right edge. Move it with the bar above it,
+  resize it with the handles, delete it with ×, finish with Esc or a click outside.
+  Color and size can be changed at any time while the box is selected. Empty
+  boxes are discarded when you finish.
+- **Unicode text** (e.g. Czech diacritics) is embedded in the saved PDF; the
+  on-screen text box uses the same font, so line breaks match the export.
+- **Undo / redo** steps through all edits in the order they were made.
 
 ### Updating the published library build
 
