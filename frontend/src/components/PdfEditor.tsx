@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from "react";
 import { PDFDocument, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import * as pdfjsLib from "pdfjs-dist";
@@ -14,6 +14,8 @@ import {
     ZoomIn,
     ZoomOut,
     Type,
+    Eraser,
+    Slash,
 } from "lucide-react";
 import { t } from "../i18n";
 
@@ -25,6 +27,13 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 // boxes containing them threw on save. Embed a Unicode TTF via fontkit instead.
 import unicodeFontUrl from "dejavu-fonts-ttf/ttf/DejaVuSans.ttf?url";
 let unicodeFontBytesPromise: Promise<ArrayBuffer> | null = null;
+// Show text boxes in the same font the PDF gets, so on-screen line breaks match the exported ones
+if (typeof document !== "undefined" && "FontFace" in window) {
+    new FontFace("DejaVuBox", `url(${unicodeFontUrl})`)
+        .load()
+        .then((f) => document.fonts.add(f))
+        .catch(() => {});
+}
 async function embedUnicodeFont(doc: PDFDocument) {
     doc.registerFontkit(fontkit);
     if (!unicodeFontBytesPromise) {
@@ -79,7 +88,16 @@ interface Point {
     y: number;
 }
 
-type ToolType = "pen" | "highlighter" | "text" | null;
+type ToolType = "pen" | "highlighter" | "text" | "eraser" | null;
+
+// Distance from point (px,py) to segment (ax,ay)-(bx,by)
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+    const dx = bx - ax,
+        dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
 type PageSizing = { mode: "fit"; targetWidth: number };
 type HandlePos = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
@@ -139,7 +157,8 @@ interface PageProps {
     onBoxPointerDown: (e: React.PointerEvent<HTMLDivElement>, id: string) => void;
     onHandlePointerDown: (e: React.PointerEvent<HTMLDivElement>, id: string, handle: HandlePos) => void;
     onBoxClick: (e: React.MouseEvent, id: string) => void;
-    onTextChange: (id: string, text: string) => void;
+    onTextChange: (id: string, text: string, needed?: { w: number; h: number }) => void;
+    onBoxDelete: (id: string) => void;
     // draw callbacks
     onSvgPointerDown: (e: React.PointerEvent<SVGSVGElement>, page: number) => void;
     onSvgPointerMove: (e: React.PointerEvent<SVGSVGElement>, page: number) => void;
@@ -167,6 +186,7 @@ function PdfPage({
     onHandlePointerDown,
     onBoxClick,
     onTextChange,
+    onBoxDelete,
     onSvgPointerDown,
     onSvgPointerMove,
     onSvgPointerUp,
@@ -210,6 +230,17 @@ function PdfPage({
     }, [pdfDocument, pageNum, sizingKey]);
 
     const pageTBs = textBoxes.filter((tb) => tb.page === pageNum);
+
+    // Wrapped text or new lines can overflow the box; grow its height to fit (never shrinks, so no loop)
+    const editTaRef = useRef<HTMLTextAreaElement>(null);
+    useLayoutEffect(() => {
+        const el = editTaRef.current;
+        const tb = pageTBs.find((b) => b.id === editingId);
+        if (!el || !tb) return;
+        if (el.scrollHeight > el.clientHeight + 1) {
+            onTextChange(tb.id, tb.text, { w: 0, h: (el.scrollHeight + 3) / (dim.height / tb.pageHeight) });
+        }
+    });
 
     return (
         <div className="sheet" style={{ width: dim.width, height: dim.height }}>
@@ -266,6 +297,9 @@ function PdfPage({
                 const isEd = editingId === tb.id;
                 const sx = dim.width / tb.pageWidth;
                 const sy = dim.height / tb.pageHeight;
+                // Width available up to the page's right edge; text only wraps once the box has reached it
+                const maxWpx = dim.width - tb.x * sx - 2;
+                const wrapAtEdge = tb.w * sx >= maxWpx - 1;
 
                 return (
                     <div
@@ -287,7 +321,7 @@ function PdfPage({
                             pointerEvents: isTextMode ? "auto" : "none",
                         }}
                         onPointerDown={(e) => {
-                            if (!isTextMode || isEd) return;
+                            if (!isTextMode) return;
                             e.stopPropagation();
                             onBoxPointerDown(e, tb.id);
                         }}
@@ -296,9 +330,29 @@ function PdfPage({
                             e.stopPropagation();
                             onBoxClick(e, tb.id);
                         }}>
-                        {/* Resize handles — only when selected and not editing */}
+                        {/* Move grip + delete — above the box while selected, so typing never conflicts with dragging */}
+                        {isSel && (
+                            <div
+                                className="tb-bar"
+                                onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                    onBoxPointerDown(e, tb.id);
+                                }}>
+                                <span className="tb-grip">⠿</span>
+                                <button
+                                    type="button"
+                                    className="tb-del"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onBoxDelete(tb.id);
+                                    }}>
+                                    ×
+                                </button>
+                            </div>
+                        )}
+                        {/* Resize handles while selected (also while typing) */}
                         {isSel &&
-                            !isEd &&
                             HANDLE_DEFS.map(({ pos, xRatio, yRatio, cursor }) => (
                                 <div
                                     key={pos}
@@ -322,13 +376,30 @@ function PdfPage({
                             <textarea
                                 className="tb-textarea"
                                 autoFocus
+                                ref={editTaRef}
                                 value={tb.text}
-                                style={{ fontSize: tb.fontSize * Math.min(sx, sy), color: tb.color }}
-                                onChange={(e) => onTextChange(tb.id, e.target.value)}
+                                style={{
+                                    fontSize: tb.fontSize * Math.min(sx, sy),
+                                    color: tb.color,
+                                    whiteSpace: wrapAtEdge ? "pre-wrap" : "pre",
+                                }}
+                                onChange={(e) => {
+                                    // Grow wider with the text until the page's right edge; only there does it
+                                    // wrap onto a new line (height growth happens in the layout effect)
+                                    const el = e.currentTarget;
+                                    const prevWS = el.style.whiteSpace;
+                                    el.style.whiteSpace = "pre";
+                                    el.style.width = "0px";
+                                    const natural = el.scrollWidth + 6;
+                                    el.style.whiteSpace = prevWS;
+                                    el.style.width = "";
+                                    onTextChange(tb.id, el.value, { w: Math.min(natural, maxWpx) / sx, h: 0 });
+                                }}
+                                onFocus={(e) => e.currentTarget.setSelectionRange(tb.text.length, tb.text.length)}
                                 onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => e.stopPropagation()}
                             />
-                        :   <div className="tb-display">
+                        :   <div className="tb-display" style={{ whiteSpace: wrapAtEdge ? "pre-wrap" : "pre" }}>
                                 {tb.text ? tb.text : <span className="tb-placeholder">{t("textbox.placeholder")}</span>}
                             </div>
                         }
@@ -372,6 +443,10 @@ export default function PdfEditor() {
     // TextBox undo stack
     const [tbHistory, setTbHistory] = useState<TextBox[][]>([[]]);
     const [tbIdx, setTbIdx] = useState(0);
+
+    // One chronological log ("a" = annotation change, "t" = text box change) so undo/redo
+    // step back through edits in the order they happened, across both stacks.
+    const [ops, setOps] = useState<{ log: ("a" | "t")[]; idx: number }>({ log: [], idx: 0 });
     const textBoxes = tbHistory[tbIdx];
 
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -392,6 +467,10 @@ export default function PdfEditor() {
     const isDrawingRef = useRef(false);
     const activePageRef = useRef<number | null>(null);
     const currentPointsRef = useRef<Point[]>([]);
+    // Every point of the current stroke; currentPointsRef holds what is shown (a 2-point line while straight)
+    const freePointsRef = useRef<Point[]>([]);
+    // Toggle for touch devices; on desktop holding Shift does the same per stroke
+    const [lineMode, setLineMode] = useState(false);
     const [statusMessage, setStatusMessage] = useState("");
 
     useEffect(() => {
@@ -413,8 +492,10 @@ export default function PdfEditor() {
 
     const isDrawMode = tool === "pen" || tool === "highlighter";
     const isTextMode = tool === "text";
-    const canUndo = hIdx > 0 || tbIdx > 0;
-    const canRedo = hIdx < history.length - 1 || tbIdx < tbHistory.length - 1;
+    const isEraser = tool === "eraser";
+    const erasingRef = useRef(false);
+    const canUndo = ops.idx > 0;
+    const canRedo = ops.idx < ops.log.length;
 
     // Keep liveTbRef in sync with committed textBoxes
     useEffect(() => {
@@ -568,6 +649,7 @@ export default function PdfEditor() {
                         setHIdx(0);
                         setTbHistory([[]]);
                         setTbIdx(0);
+                        setOps({ log: [], idx: 0 });
                         setZoomFactor(1);
                         zoomFactorRef.current = 1;
                         setStatusMessage(t("status.loaded"));
@@ -624,6 +706,7 @@ export default function PdfEditor() {
                     setHIdx(0);
                     setTbHistory([[]]);
                     setTbIdx(0);
+                    setOps({ log: [], idx: 0 });
                     setZoomFactor(1);
                     zoomFactorRef.current = 1;
                     setStatusMessage(t("status.loaded"));
@@ -649,6 +732,7 @@ export default function PdfEditor() {
                 setHIdx(0);
                 setTbHistory([[]]);
                 setTbIdx(0);
+                setOps({ log: [], idx: 0 });
                 setZoomFactor(1);
                 zoomFactorRef.current = 1;
                 setStatusMessage(t("status.loaded"));
@@ -679,6 +763,7 @@ export default function PdfEditor() {
         setHistory((prev) => [...prev.slice(0, idx + 1), next]);
         hIdxRef.current = idx + 1;
         setHIdx(idx + 1);
+        setOps((o) => ({ log: [...o.log.slice(0, o.idx), "a"], idx: o.idx + 1 }));
     }, []);
 
     const commitTextBoxes = useCallback((next: TextBox[]) => {
@@ -706,26 +791,47 @@ export default function PdfEditor() {
         setTbHistory((prev) => [...prev.slice(0, idx + 1), norm]);
         tbIdxRef.current = idx + 1;
         setTbIdx(idx + 1);
+        setOps((o) => ({ log: [...o.log.slice(0, o.idx), "t"], idx: o.idx + 1 }));
         liveTbRef.current = norm;
     }, []);
 
+    // Commit the live boxes, dropping blank ones (except keepId) so stray empty boxes don't pile up
+    const finishEditing = useCallback(
+        (keepId?: string) => {
+            commitTextBoxes(liveTbRef.current.filter((tb) => tb.text.trim() || tb.id === keepId));
+        },
+        [commitTextBoxes],
+    );
+
     // ── undo / redo ───────────────────────────────────────────────────
     const undo = useCallback(() => {
-        if (tbIdx > 0) setTbIdx((i) => i - 1);
-        else if (hIdx > 0) setHIdx((i) => i - 1);
-    }, [tbIdx, hIdx]);
+        if (ops.idx === 0) return;
+        if (ops.log[ops.idx - 1] === "a") setHIdx((i) => i - 1);
+        else setTbIdx((i) => i - 1);
+        setOps({ ...ops, idx: ops.idx - 1 });
+    }, [ops]);
 
     const redo = useCallback(() => {
-        if (tbIdx < tbHistory.length - 1) setTbIdx((i) => i + 1);
-        else if (hIdx < history.length - 1) setHIdx((i) => i + 1);
-    }, [tbIdx, tbHistory.length, hIdx, history.length]);
+        if (ops.idx >= ops.log.length) return;
+        if (ops.log[ops.idx] === "a") setHIdx((i) => i + 1);
+        else setTbIdx((i) => i + 1);
+        setOps({ ...ops, idx: ops.idx + 1 });
+    }, [ops]);
 
     // ── keyboard ──────────────────────────────────────────────────────
     useEffect(() => {
         const h = (e: KeyboardEvent) => {
             if (!pdfDocument) return;
             const mod = e.ctrlKey || e.metaKey;
-            if (editingId) return; // don't steal keys while typing
+            if (editingId) {
+                // don't steal keys while typing, except Escape which finishes editing
+                if (e.key === "Escape") {
+                    finishEditing();
+                    setSelectedId(null);
+                    setEditingId(null);
+                }
+                return;
+            }
             if (mod) {
                 const k = e.key.toLowerCase();
                 if (k === "z" && !e.shiftKey) {
@@ -746,7 +852,7 @@ export default function PdfEditor() {
         };
         window.addEventListener("keydown", h);
         return () => window.removeEventListener("keydown", h);
-    }, [pdfDocument, undo, redo, selectedId, editingId, commitTextBoxes]);
+    }, [pdfDocument, undo, redo, selectedId, editingId, commitTextBoxes, finishEditing]);
 
     // ── global pointermove / pointerup for drag ───────────────────────
     useEffect(() => {
@@ -811,12 +917,14 @@ export default function PdfEditor() {
             // If currently editing a text box, clicking outside exits edit mode
             // without creating a new box.
             if (editingId) {
-                commitTextBoxes([...liveTbRef.current]);
+                finishEditing();
                 setSelectedId(null);
                 setEditingId(null);
                 return;
             }
-            // Create new text box
+            // Create new text box. preventDefault stops the follow-up mousedown from
+            // stealing focus, so the new textarea keeps focus and typing starts at once.
+            e.preventDefault();
             const pt = getSvgCoords(e, page);
             const dim = pageDimRef.current[page] || { width: 600, height: 800, nativeWidth: 600, nativeHeight: 800 };
             const toNative = (v: number, zoomed: number, native: number) => v * (native / zoomed);
@@ -826,7 +934,7 @@ export default function PdfEditor() {
                 x: toNative(pt.x, dim.width, dim.nativeWidth),
                 y: toNative(pt.y, dim.height, dim.nativeHeight),
                 w: 100,
-                h: Math.round(textFontSize * 1.5),
+                h: Math.round(textFontSize * 1.45 + 3),
                 text: "",
                 fontSize: textFontSize,
                 color: textColor,
@@ -839,6 +947,12 @@ export default function PdfEditor() {
             setEditingId(nb.id);
             return;
         }
+        if (isEraser) {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            erasingRef.current = true;
+            eraseAt(page, getSvgCoords(e, page));
+            return;
+        }
         if (!isDrawMode) return;
         e.currentTarget.setPointerCapture(e.pointerId);
         const pt = getSvgCoords(e, page);
@@ -847,20 +961,51 @@ export default function PdfEditor() {
         isDrawingRef.current = true;
         activePageRef.current = page;
         currentPointsRef.current = [pt];
+        freePointsRef.current = [pt];
         setIsDrawing(true);
         setActivePage(page);
         setCurrentPoints([pt]);
     };
 
+    // Removes every stroke on `page` that passes within a few px of `pt`.
+    const eraseAt = (page: number, pt: Point) => {
+        const dim = pageDimRef.current[page];
+        if (!dim) return;
+        const kept = annotationsRef.current.filter((a) => {
+            if (a.page !== page) return true;
+            const sx = dim.width / a.width,
+                sy = dim.height / a.height;
+            const pts = [...a.d.matchAll(/[ML]([-\d.eE+]+),([-\d.eE+]+)/g)].map((m) => ({
+                x: Number(m[1]) * sx,
+                y: Number(m[2]) * sy,
+            }));
+            const reach = 10 + (a.strokeWidth * sx) / 2;
+            return !pts.some((p, i) => {
+                const q = pts[i + 1] ?? p;
+                return distToSegment(pt.x, pt.y, p.x, p.y, q.x, q.y) <= reach;
+            });
+        });
+        if (kept.length === annotationsRef.current.length) return;
+        annotationsRef.current = kept; // effect syncs it only after render; avoid double-commit within one drag
+        commitAnnotations(kept);
+    };
+
     const handleSvgPointerMove = (e: React.PointerEvent<SVGSVGElement>, page: number) => {
+        if (erasingRef.current) {
+            eraseAt(page, getSvgCoords(e, page));
+            return;
+        }
         if (!isDrawingRef.current || activePageRef.current !== page) return;
         const pt = getSvgCoords(e, page);
-        const next = [...currentPointsRef.current, pt];
+        const free = [...freePointsRef.current, pt];
+        freePointsRef.current = free;
+        const next = lineMode || e.shiftKey ? [free[0], pt] : free;
         currentPointsRef.current = next;
         setCurrentPoints(next);
     };
 
     const handleSvgPointerUp = (_e: React.PointerEvent<SVGSVGElement>, page: number) => {
+        erasingRef.current = false;
         // Use refs instead of state so this guard works even when pointerDown and
         // pointerUp fire in the same React batch (stale-closure would make the
         // state values appear unchanged).
@@ -898,7 +1043,6 @@ export default function PdfEditor() {
 
     // ── text box interaction ──────────────────────────────────────────
     const handleBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>, id: string) => {
-        if (editingId === id) return;
         e.currentTarget.setPointerCapture(e.pointerId);
         const tb = liveTbRef.current.find((t) => t.id === id);
         if (!tb) return;
@@ -973,49 +1117,79 @@ export default function PdfEditor() {
         e.stopPropagation();
         // Commit in-progress edit before switching
         if (editingId && editingId !== id) {
-            commitTextBoxes([...liveTbRef.current]);
+            finishEditing(id);
         }
         const tb = liveTbRef.current.find((t) => t.id === id);
         if (!tb) return;
-        // Sync toolbar to this box's settings (only affects new boxes)
+        // Sync toolbar to this box's settings
         // Convert stored (possibly zoom-normalized) fontSize back to native space
         const dim = pageDimRef.current[tb.page];
         const nativeFontSize = dim ? tb.fontSize * (dim.nativeWidth / tb.pageWidth) : tb.fontSize;
         setTextFontSize(Math.round(nativeFontSize));
         setTextColor(tb.color);
-        if (selectedId === id) {
-            setEditingId(id);
-        } else {
-            setSelectedId(id);
-            setEditingId(null);
-        }
+        // Selecting a box always means editing it: type, move and resize without mode switches
+        setSelectedId(id);
+        setEditingId(id);
     };
 
-    const handleTextChange = (id: string, text: string) => {
-        // Update live without pushing history on every keystroke
-        liveTbRef.current = liveTbRef.current.map((tb) => (tb.id === id ? { ...tb, text } : tb));
+    const handleBoxDelete = (id: string) => {
+        commitTextBoxes(liveTbRef.current.filter((t) => t.id !== id));
+        setSelectedId(null);
+        setEditingId(null);
+    };
+
+    // Toolbar edits apply to the selected box too (not only to new ones).
+    // commit=false updates live (slider drag); commit=true also pushes undo history.
+    const updateSelectedBox = (patch: { color?: string; nativeFontSize?: number }, commit: boolean) => {
+        if (!selectedId) return;
+        liveTbRef.current = liveTbRef.current.map((tb) => {
+            if (tb.id !== selectedId) return tb;
+            const { nativeFontSize, ...rest } = patch;
+            const dim = pageDimRef.current[tb.page];
+            const fontSize =
+                nativeFontSize === undefined ? tb.fontSize
+                : dim ? nativeFontSize * (tb.pageWidth / dim.nativeWidth)
+                : nativeFontSize;
+            return { ...tb, ...rest, fontSize };
+        });
+        if (commit) commitTextBoxes([...liveTbRef.current]);
+        else forceRender((n) => n + 1);
+    };
+
+    const handleTextColorChange = (c: string) => {
+        setTextColor(c);
+        updateSelectedBox({ color: c }, true);
+    };
+
+    const handleTextChange = (id: string, text: string, needed?: { w: number; h: number }) => {
+        // Update live without pushing history on every keystroke; grow (never shrink) to fit the text
+        liveTbRef.current = liveTbRef.current.map((tb) =>
+            tb.id === id ? { ...tb, text, w: Math.max(tb.w, needed?.w ?? 0), h: Math.max(tb.h, needed?.h ?? 0) } : tb,
+        );
         forceRender((n) => n + 1);
     };
 
     // Deselect text boxes when clicking blank area — but never interfere with draw mode
     const handleViewportPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
         // In draw mode the SVG handles everything — don't touch text box state
-        if (isDrawMode) return;
+        if (isDrawMode || isEraser) return;
         // Ignore clicks that landed on a text box element
         if ((e.target as HTMLElement).closest(".tb")) return;
         // Ignore clicks that landed on the SVG overlay or canvas (sheet internals)
         if ((e.target as HTMLElement).closest(".sheet-overlay")) return;
+        // The text-tool click-catcher creates/finishes boxes itself; deselecting here would undo that
+        if ((e.target as HTMLElement).closest(".sheet-text-catcher")) return;
         if ((e.target as HTMLElement).tagName === "CANVAS") return;
         // Commit any in-progress text edit and deselect
         if (editingId) {
-            commitTextBoxes([...liveTbRef.current]);
+            finishEditing();
         }
         setSelectedId(null);
         setEditingId(null);
     };
 
     // ── tool select ───────────────────────────────────────────────────
-    const handleToolSelect = (t: "pen" | "highlighter" | "text") => {
+    const handleToolSelect = (t: "pen" | "highlighter" | "text" | "eraser") => {
         if (tool === t) {
             setTool(null);
             return;
@@ -1072,13 +1246,15 @@ export default function PdfEditor() {
                 const sx = pw / tb.pageWidth,
                     sy = ph / tb.pageHeight;
                 pg.drawText(tb.text, {
-                    x: tb.x * sx + 4,
-                    y: ph - (tb.y + tb.h) * sy + 4,
+                    x: (tb.x + 1.5) * sx + 0.2 * tb.fontSize * Math.min(sx, sy),
+                    // first baseline: 1.5px box border + 0.1em padding + 0.965em (DejaVu baseline in a 1.25 line box); padding scales with font size like on screen
+                    y: ph - (tb.y + 1.5) * sy - 1.065 * tb.fontSize * Math.min(sx, sy),
                     size: tb.fontSize * Math.min(sx, sy),
                     font,
                     color: hexToRgb(tb.color),
-                    maxWidth: tb.w * sx - 8,
-                    lineHeight: tb.fontSize * Math.min(sx, sy) * 1.4,
+                    // pdf-lib counts the trailing space when deciding to wrap, so add its width back to match the browser
+                    maxWidth: tb.w * sx - 3 * sx - 0.4 * tb.fontSize * Math.min(sx, sy) + font.widthOfTextAtSize(" ", tb.fontSize * Math.min(sx, sy)) + 0.5,
+                    lineHeight: tb.fontSize * Math.min(sx, sy) * 1.25,
                 });
             });
 
@@ -1217,13 +1393,15 @@ export default function PdfEditor() {
                 const sx = pw / tb.pageWidth,
                     sy = ph / tb.pageHeight;
                 pg.drawText(tb.text, {
-                    x: tb.x * sx + 4,
-                    y: ph - (tb.y + tb.h) * sy + 4,
+                    x: (tb.x + 1.5) * sx + 0.2 * tb.fontSize * Math.min(sx, sy),
+                    // first baseline: 1.5px box border + 0.1em padding + 0.965em (DejaVu baseline in a 1.25 line box); padding scales with font size like on screen
+                    y: ph - (tb.y + 1.5) * sy - 1.065 * tb.fontSize * Math.min(sx, sy),
                     size: tb.fontSize * Math.min(sx, sy),
                     font,
                     color: hexToRgb(tb.color),
-                    maxWidth: tb.w * sx - 8,
-                    lineHeight: tb.fontSize * Math.min(sx, sy) * 1.4,
+                    // pdf-lib counts the trailing space when deciding to wrap, so add its width back to match the browser
+                    maxWidth: tb.w * sx - 3 * sx - 0.4 * tb.fontSize * Math.min(sx, sy) + font.widthOfTextAtSize(" ", tb.fontSize * Math.min(sx, sy)) + 0.5,
+                    lineHeight: tb.fontSize * Math.min(sx, sy) * 1.25,
                 });
             });
 
@@ -1321,6 +1499,13 @@ export default function PdfEditor() {
                                         <Type size={16} />
                                         <span className="btn-label">{t("toolbar.text")}</span>
                                     </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleToolSelect("eraser")}
+                                        className={`seg-btn ${tool === "eraser" ? "seg-btn-active" : ""}`}>
+                                        <Eraser size={16} />
+                                        <span className="btn-label">{t("toolbar.eraser")}</span>
+                                    </button>
                                 </div>
 
                                 <div className="icon-cluster">
@@ -1410,9 +1595,23 @@ export default function PdfEditor() {
                             />
                             <span className="config-value">{strokeWidth}px</span>
                         </div>
+                        <button
+                            type="button"
+                            title={t("config.straightLineHint")}
+                            onClick={() => setLineMode((v) => !v)}
+                            className={`seg-btn ${lineMode ? "seg-btn-active" : ""}`}>
+                            <Slash size={16} />
+                            <span className="btn-label">{t("config.straightLine")}</span>
+                        </button>
                         <span className="badge">
                             {tool === "pen" ? t("badge.penActive") : t("badge.highlightActive")}
                         </span>
+                    </div>
+                )}
+
+                {hasDoc && isEraser && (
+                    <div className="config-bar">
+                        <span className="badge">{t("badge.eraserActive")}</span>
                     </div>
                 )}
 
@@ -1426,13 +1625,13 @@ export default function PdfEditor() {
                                         key={c}
                                         className={"swatch" + (c === textColor ? " swatch-active" : "")}
                                         style={{ background: c }}
-                                        onClick={() => setTextColor(c)}
+                                        onClick={() => handleTextColorChange(c)}
                                     />
                                 ))}
                                 <input
                                     type="color"
                                     value={textColor}
-                                    onChange={(e) => setTextColor(e.target.value)}
+                                    onChange={(e) => handleTextColorChange(e.target.value)}
                                     className="swatch-input"
                                 />
                             </div>
@@ -1444,7 +1643,12 @@ export default function PdfEditor() {
                                 min="8"
                                 max="72"
                                 value={textFontSize}
-                                onChange={(e) => setTextFontSize(Number(e.target.value))}
+                                onChange={(e) => {
+                                    setTextFontSize(Number(e.target.value));
+                                    updateSelectedBox({ nativeFontSize: Number(e.target.value) }, false);
+                                }}
+                                onPointerUp={() => selectedId && commitTextBoxes([...liveTbRef.current])}
+                                onKeyUp={() => selectedId && commitTextBoxes([...liveTbRef.current])}
                                 className="slider-input"
                             />
                             <span className="config-value">{textFontSize}px</span>
@@ -1486,7 +1690,7 @@ export default function PdfEditor() {
                                 pageNum={pageNum}
                                 pdfDocument={pdfDocument!}
                                 sizing={sizing}
-                                isDrawMode={isDrawMode}
+                                isDrawMode={isDrawMode || isEraser}
                                 isTextMode={isTextMode}
                                 annotations={annotations}
                                 textBoxes={renderBoxes}
@@ -1505,6 +1709,7 @@ export default function PdfEditor() {
                                 onHandlePointerDown={handleHandlePointerDown}
                                 onBoxClick={handleBoxClick}
                                 onTextChange={handleTextChange}
+                                onBoxDelete={handleBoxDelete}
                                 onSvgPointerDown={handleSvgPointerDown}
                                 onSvgPointerMove={handleSvgPointerMove}
                                 onSvgPointerUp={handleSvgPointerUp}
@@ -1635,6 +1840,25 @@ const STYLES = `
     background: rgba(79,126,248,.04);
 }
 
+.tb-bar {
+    position: absolute;
+    left: -1.5px; top: -22px;
+    height: 20px;
+    display: flex; align-items: center; gap: 2px;
+    background: #4f7ef8; color: #fff;
+    border-radius: 4px 4px 0 0;
+    cursor: grab;
+    touch-action: none;
+    z-index: 10;
+}
+.tb-grip { padding: 0 8px; font-size: 13px; line-height: 20px; }
+.tb-del {
+    border: none; background: transparent; color: #fff;
+    width: 20px; height: 20px; font-size: 16px; line-height: 20px;
+    cursor: pointer; padding: 0;
+}
+.tb-del:hover { background: rgba(0,0,0,.25); }
+
 .tb-handle {
     position: absolute;
     background: #fff;
@@ -1647,11 +1871,14 @@ const STYLES = `
 
 .tb-display {
     width: 100%; height: 100%;
-    padding: 4px 6px;
+    padding: 0.1em 0.2em;
     overflow: hidden;
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.4;
+    font-family: "DejaVuBox", sans-serif;
+    font-kerning: none;
+    font-variant-ligatures: none;
+    line-height: 1.25;
     pointer-events: none;
 }
 .tb-placeholder { color: #adb1ba; font-style: italic; }
@@ -1659,15 +1886,18 @@ const STYLES = `
 .tb-textarea {
     display: block;
     width: 100%; height: 100%;
-    padding: 4px 6px;
+    padding: 0.1em 0.2em;
     border: none; outline: none;
     background: rgba(255,255,255,.93);
     resize: none;
-    font-family: inherit;
-    line-height: 1.4;
+    font-family: "DejaVuBox", sans-serif;
+    font-kerning: none;
+    font-variant-ligatures: none;
+    line-height: 1.25;
     white-space: pre-wrap;
     word-break: break-word;
     border-radius: 3px;
+    overflow: hidden;
 }
 
 @media (max-width:1024px) {
